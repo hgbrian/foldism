@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Output
+out/
+*.cif
+*.pdb
+*.npz
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Modal
+.modal/
+
+# OS
+.DS_Store
+Thumbs.db
