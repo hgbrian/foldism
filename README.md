@@ -2,7 +2,7 @@
 
 Multi-algorithm protein structure prediction using Modal serverless infrastructure.
 
-Runs **Boltz**, **Chai-1**, **Protenix**, and **AlphaFold2** on the same input, with automatic caching via Modal Volumes.
+Runs **Boltz-2**, **Chai-1**, **Protenix**, and **AlphaFold2** on the same input, with automatic caching via Modal Volumes.
 
 ## Quick Start
 
@@ -24,10 +24,10 @@ uv run modal run foldism.py --input-faa test.faa
 
 ```bash
 # Single algorithm
-uv run modal run foldism.py --input-faa test.faa --algorithms boltz
+uv run modal run foldism.py --input-faa test.faa --algorithms boltz2
 
 # Multiple algorithms
-uv run modal run foldism.py --input-faa test.faa --algorithms boltz,chai1,alphafold2
+uv run modal run foldism.py --input-faa test.faa --algorithms boltz2,chai1,alphafold2
 
 # All algorithms
 uv run modal run foldism.py --input-faa test.faa
@@ -75,8 +75,8 @@ Supported entity types: `protein`, `dna`, `rna`, `ligand`
 
 ```
 out/fold/{run_name}/
-├── {run_name}.boltz.cif
-├── {run_name}.boltz.scores.json
+├── {run_name}.boltz2.cif
+├── {run_name}.boltz2.scores.json
 ├── {run_name}.chai1.cif
 ├── {run_name}.chai1.scores.json
 ├── {run_name}.protenix.cif
@@ -106,8 +106,8 @@ uv run modal deploy foldism.py::web_app
 ## Caching
 
 Results are cached in Modal Volumes:
-- `foldism-boltz-models` - Boltz model weights
-- `foldism-boltz-cache` - Boltz prediction cache
+- `foldism-boltz-models` - Boltz-2 model weights
+- `foldism-boltz-cache` - Boltz-2 prediction cache
 - `foldism-chai1-cache` - Chai-1 prediction cache
 - `foldism-protenix-cache` - Protenix prediction cache
 - `foldism-alphafold-cache` - AlphaFold2 prediction cache
