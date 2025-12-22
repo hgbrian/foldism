@@ -329,6 +329,7 @@ HTML_TEMPLATE = """
         #viewer-container { width: 100%; height: 500px; background: #fff; border-radius: 4px; border: 1px solid #ddd; }
         .results { margin-top: 15px; }
         .result-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #f9fafb; border-radius: 4px; margin-bottom: 8px; }
+        .result-item input[type="checkbox"] { margin-right: 8px; cursor: pointer; }
         .result-item .downloads { display: flex; gap: 8px; }
         .result-item .downloads a { color: #2563eb; text-decoration: none; font-size: 13px; padding: 4px 8px; border: 1px solid #2563eb; border-radius: 4px; }
         .metrics { display: flex; gap: 8px; margin-left: 12px; }
@@ -371,9 +372,9 @@ HTML_TEMPLATE = """
             <div class="log" id="log"></div>
         </div>
         <div class="example-link">
-            Examples: <a href="#" onclick="loadInsulin(); return false;">Insulin</a> |
-            <a href="#" onclick="loadGFP(); return false;">GFP</a> |
-            <a href="#" onclick="loadLysozyme(); return false;">Lysozyme</a>
+            Examples: <span id="examples-list">loading...</span>
+            <a href="#" onclick="saveCurrentSequence(); return false;" style="margin-left:8px;color:#16a34a;" title="Save current sequence">[+]</a>
+            <span id="undo-btn" style="display:none;"><a href="#" onclick="undoDelete(); return false;" style="margin-left:8px;color:#666;" title="Undo delete">[undo]</a></span>
         </div>
     </div>
     <div class="panel">
@@ -391,11 +392,63 @@ HTML_TEMPLATE = """
         document.addEventListener("DOMContentLoaded", function () {
             stage = new NGL.Stage("viewer-container", { backgroundColor: "white" });
             window.addEventListener("resize", () => stage.handleResize(), false);
+            loadExamples();
         });
 
-        function loadInsulin() { document.getElementById('fasta-input').value = '>InsulinA\\nGIVEQCCTSICSLYQLENYCN\\n>InsulinB\\nFVNQHLCGSHLVEALYLVCGERGFFYTPKT'; }
-        function loadGFP() { document.getElementById('fasta-input').value = '>GFP\\nMSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLTYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITLGMDELYK'; }
-        function loadLysozyme() { document.getElementById('fasta-input').value = '>Lysozyme\\nKVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL'; }
+        async function loadExamples() {
+            try {
+                const res = await fetch('/examples');
+                const data = await res.json();
+                const container = document.getElementById('examples-list');
+                if (!data.examples || data.examples.length === 0) {
+                    container.innerHTML = '<span style="color:#999;">none saved</span>';
+                    return;
+                }
+                container.innerHTML = data.examples.map(name =>
+                    `<a href="#" onclick="loadExample('${name}'); return false;">${name}</a><a href="#" onclick="deleteExample('${name}'); return false;" style="color:#999;margin-right:10px;text-decoration:none;" title="Delete ${name}">[×]</a>`
+                ).join('');
+            } catch (e) { console.error('Failed to load examples:', e); }
+        }
+
+        async function loadExample(name) {
+            try {
+                const res = await fetch('/examples/' + encodeURIComponent(name));
+                const data = await res.json();
+                if (data.fasta) document.getElementById('fasta-input').value = data.fasta;
+            } catch (e) { console.error('Failed to load example:', e); }
+        }
+
+        async function saveCurrentSequence() {
+            const fasta = document.getElementById('fasta-input').value.trim();
+            if (!fasta) { alert('No sequence to save'); return; }
+            try {
+                await fetch('/examples', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({fasta}) });
+                loadExamples();
+                document.getElementById('undo-btn').style.display = 'none';
+            } catch (e) { console.error('Failed to save:', e); }
+        }
+
+        let lastDeleted = null;
+        async function deleteExample(name) {
+            try {
+                const res = await fetch('/examples/' + encodeURIComponent(name));
+                const data = await res.json();
+                if (data.fasta) lastDeleted = { name, fasta: data.fasta };
+                await fetch('/examples/' + encodeURIComponent(name), { method: 'DELETE' });
+                loadExamples();
+                document.getElementById('undo-btn').style.display = 'inline';
+            } catch (e) { console.error('Failed to delete:', e); }
+        }
+
+        async function undoDelete() {
+            if (!lastDeleted) return;
+            try {
+                await fetch('/examples', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({fasta: lastDeleted.fasta}) });
+                lastDeleted = null;
+                document.getElementById('undo-btn').style.display = 'none';
+                loadExamples();
+            } catch (e) { console.error('Failed to undo:', e); }
+        }
 
         // Track running methods for progressive dots
         const runningMethods = {};
@@ -677,6 +730,12 @@ HTML_TEMPLATE = """
             } catch (e) { console.error(`Failed to load ${methodName}:`, e); }
         }
 
+        function toggleStructureVisibility(methodName, visible) {
+            if (loadedComponents[methodName]) {
+                loadedComponents[methodName].setVisibility(visible);
+            }
+        }
+
         let downloadAllPending = null;  // Guard against concurrent calls
         async function updateDownloadAllButton(resultsData, inputHash, totalMethods) {
             if (resultsData.length === 0) return;
@@ -943,7 +1002,7 @@ HTML_TEMPLATE = """
 
                                 const item = document.createElement('div');
                                 item.className = 'result-item';
-                                item.innerHTML = `<span style="display:flex;align-items:center;"><span style="display:inline-block;width:12px;height:12px;background:${colorStr};border-radius:2px;margin-right:6px;"></span>${result.method}${metricsHTML}</span><span class="downloads">${downloads}</span>`;
+                                item.innerHTML = `<span style="display:flex;align-items:center;"><input type="checkbox" checked onchange="toggleStructureVisibility('${result.method}', this.checked)"><span style="display:inline-block;width:12px;height:12px;background:${colorStr};border-radius:2px;margin-right:6px;"></span>${result.method}${metricsHTML}</span><span class="downloads">${downloads}</span>`;
                                 resultsEl.appendChild(item);
 
                                 // Load structure asynchronously (don't block on it)
@@ -1527,6 +1586,7 @@ def _check_cache_inline_for_job(method: str, fasta_str: str, use_msa: bool) -> l
 @wsgi_app()
 def web():
     from io import BytesIO
+    from pathlib import Path
     from flask import Flask, Response, render_template_string, request, send_file, abort
 
     flask_app = Flask(__name__)
@@ -1534,8 +1594,6 @@ def web():
 
     def check_cache_in_server(method: str, fasta_str: str, use_msa: bool) -> list | None:
         """Check cache directly in the web server - no container spawn needed."""
-        from pathlib import Path
-
         converted = convert_for_app(fasta_str, method)
 
         # Build params dict for cache key
@@ -1572,6 +1630,76 @@ def web():
     @flask_app.route("/", methods=["GET"])
     def home():
         return render_template_string(HTML_TEMPLATE)
+
+    @flask_app.route("/examples", methods=["GET"])
+    def list_examples():
+        """List saved example sequences."""
+        from flask import jsonify
+        import re
+
+        examples_dir = Path("/cache/examples")
+        if not examples_dir.exists():
+            return jsonify({"examples": []})
+
+        CACHE_VOLUME.reload()
+        examples = sorted([f.stem for f in examples_dir.glob("*.fasta")])
+        return jsonify({"examples": examples})
+
+    @flask_app.route("/examples", methods=["POST"])
+    def save_example():
+        """Save current sequence as example."""
+        from flask import jsonify
+        import re
+
+        data = request.get_json()
+        fasta = data.get("fasta", "").strip()
+        if not fasta:
+            return jsonify({"error": "No sequence"}), 400
+
+        # Extract name from first header line
+        match = re.match(r">([^\n\r]+)", fasta)
+        if match:
+            name = match.group(1).split()[0].split("|")[0][:30]  # First word, max 30 chars
+            name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+        else:
+            name = "sequence"
+
+        examples_dir = Path("/cache/examples")
+        examples_dir.mkdir(parents=True, exist_ok=True)
+        (examples_dir / f"{name}.fasta").write_text(fasta)
+        CACHE_VOLUME.commit()
+
+        return jsonify({"name": name})
+
+    @flask_app.route("/examples/<name>", methods=["GET"])
+    def get_example(name):
+        """Get an example sequence."""
+        from flask import jsonify
+        import re
+
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+        fasta_path = Path(f"/cache/examples/{name}.fasta")
+
+        CACHE_VOLUME.reload()
+        if not fasta_path.exists():
+            return jsonify({"error": "Not found"}), 404
+
+        return jsonify({"fasta": fasta_path.read_text()})
+
+    @flask_app.route("/examples/<name>", methods=["DELETE"])
+    def delete_example(name):
+        """Delete an example sequence."""
+        from flask import jsonify
+        import re
+
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+        fasta_path = Path(f"/cache/examples/{name}.fasta")
+
+        if fasta_path.exists():
+            fasta_path.unlink()
+            CACHE_VOLUME.commit()
+
+        return jsonify({"ok": True})
 
     @flask_app.route("/fold", methods=["POST"])
     def fold():
