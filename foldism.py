@@ -1235,7 +1235,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
     import time
     import zipfile
 
-    def update_job(progress: int, status: str, logs: list[dict] | None = None, results: list[dict] | None = None, done: bool = False, combined_zip: str | None = None):
+    def update_job(progress: int, status: str, logs: list[dict] | None = None, results: list[dict] | None = None, done: bool = False):
         # Merge with existing state to preserve backend logs (boltz_logs, chai1_logs, etc.)
         state = job_store.get(job_id, {})
         state["progress"] = progress
@@ -1248,8 +1248,6 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
             existing_results = state.get("results", [])
             existing_results.extend(results)
             state["results"] = existing_results
-        if combined_zip is not None:
-            state["combined_zip"] = combined_zip
         job_store[job_id] = state
 
     total = len(methods)
@@ -1498,30 +1496,8 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
 
         results.append({"method": FOLDING_APPS[method].name, "method_key": method, "data": data_payload, "format": fmt})
 
-    # Create combined zip
-    combined_zip_b64 = None
-    try:
-        input_hash = hashlib.sha256(fasta.encode()).hexdigest()[:6]
-        combined_buffer = io.BytesIO()
-        with zipfile.ZipFile(combined_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for method, (files, error) in all_results.items():
-                if error or not files:
-                    continue
-                method_slug = FOLDING_APPS[method].name.lower().replace("-", "_")
-                if "structure" in files:
-                    structure_bytes, fmt = files["structure"]
-                    # Use aligned structure if available
-                    if method in structures_to_superpose:
-                        structure_bytes = structures_to_superpose[method]
-                    zf.writestr(f"{method_slug}-{input_hash}.{fmt}", structure_bytes)
-                if "all_files" in files and files["all_files"]:
-                    for name, content in files["all_files"]:
-                        zf.writestr(f"{method_slug}/{name}", content)
-        combined_zip_b64 = base64.b64encode(combined_buffer.getvalue()).decode("ascii")
-    except Exception as e:
-        print(f"[job] Failed to create combined zip: {e}")
-
-    update_job(100, "Complete", logs, results, done=True, combined_zip=combined_zip_b64)
+    # Combined zip is built client-side from individual results (to avoid Modal Dict size limits)
+    update_job(100, "Complete", logs, results, done=True)
 
 
 def _check_cache_inline_for_job(method: str, fasta_str: str, use_msa: bool) -> list | None:
@@ -1759,37 +1735,8 @@ def web():
 
                 yield f"data: {json.dumps({'progress': 100, 'status': 'Complete', 'result': {'method': FOLDING_APPS[method].name, 'method_key': method, 'data': data_payload, 'format': fmt}})}\n\n"
 
-            # Create combined zip with all files from all methods
-            # Root level: best structure from each method (boltz-{hash}.cif, chai1-{hash}.cif, etc)
-            # Subdirectories: all files from each method
-            combined_zip_b64 = None
-            try:
-                import io
-                import zipfile
-                import hashlib
-                input_hash = hashlib.sha256(fasta.encode()).hexdigest()[:6]
-                combined_buffer = io.BytesIO()
-                with zipfile.ZipFile(combined_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for method, (files, error) in all_results.items():
-                        if error or not files:
-                            continue
-                        method_slug = FOLDING_APPS[method].name.lower().replace("-", "_")
-                        # Add best structure at root level
-                        if "structure" in files:
-                            structure_bytes, fmt = files["structure"]
-                            zf.writestr(f"{method_slug}-{input_hash}.{fmt}", structure_bytes)
-                        # Add all files under method subdirectory
-                        if "all_files" in files and files["all_files"]:
-                            for name, content in files["all_files"]:
-                                zf.writestr(f"{method_slug}/{name}", content)
-                combined_zip_b64 = base64.b64encode(combined_buffer.getvalue()).decode('ascii')
-            except Exception as e:
-                print(f"[web] Failed to create combined zip: {e}")
-
-            done_payload = {'progress': 100, 'done': True}
-            if combined_zip_b64:
-                done_payload['combined_zip'] = combined_zip_b64
-            yield f"data: {json.dumps(done_payload)}\n\n"
+            # Combined zip is built client-side from individual results
+            yield f"data: {json.dumps({'progress': 100, 'done': True})}\n\n"
 
         return Response(generate(), mimetype="text/event-stream")
 
