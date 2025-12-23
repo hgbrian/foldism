@@ -6,31 +6,35 @@ Runs **Boltz-2**, **Chai-1**, **Protenix**, **Protenix-Mini**, and **AlphaFold2*
 
 ## Quick Start
 
+Set up uv and modal (mac and linux)
 ```bash
-# Deploy
-uv run modal deploy foldism.py
-
-# Dev server
-uv run modal serve foldism.py
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv run modal setup
 ```
 
-## CLI
+Run dev server or deploy
+```bash
+uv run modal serve foldism.py
+uv run modal deploy foldism.py
+```
 
+## Command line interface
+
+Examples
 ```bash
 uv run modal run foldism.py --input-faa input.faa
 uv run modal run foldism.py --input-faa input.faa --algorithms chai1,boltz2
 uv run modal run foldism.py --input-faa input.faa --no-use-msa  # skip MSA (faster)
 ```
 
-## Testing
-
+Test
 ```bash
 python test_cli.py
 ```
 
 ## Input Format
 
-Standard FASTA:
+Standard FASTA. Only protein is supported for now:
 
 ```
 >Protein1
