@@ -42,16 +42,13 @@
 </head>
 <body>
 
-<div style="display: flex; align-items: flex-end; gap: 12px; margin-bottom: 5px;">
+<div style="display: flex; align-items: flex-end; gap: 3px; margin-bottom: 5px;">
   <svg viewBox="430 200 380 530" xmlns="http://www.w3.org/2000/svg" style="width: 52px; height: 52px; margin-bottom: -8px;">
     <defs>
       <path id="p" d="M548,427c10,-4 30,-12 47,-22c40,-22 85,-45 113,-82c15,-20 18,-55 5,-70c-10,-12 -30,-5 -42,10c-20,25 -25,70 -30,110c-8,65 -15,140 -40,200c-12,30 -35,55 -60,50c-20,-4 -25,-30 -15,-55c12,-30 35,-50 60,-75c45,-40 100,-80 145,-110"/>
       <linearGradient id="g" y2="1">
-        <stop offset="0" stop-color="#FF6B6B"/>
-        <stop offset=".25" stop-color="#4ECDC4"/>
-        <stop offset=".5" stop-color="#45B7D1"/>
-        <stop offset=".75" stop-color="#96E6A1"/>
-        <stop offset="1" stop-color="#DDA0DD"/>
+        <stop offset="0" stop-color="#4ECDC4"/>
+        <stop offset="1" stop-color="#96E6A1"/>
       </linearGradient>
     </defs>
     <use href="#p" fill="none" stroke="#000" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
@@ -59,7 +56,7 @@
   </svg>
   <h1 style="color: #333; font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; margin: 0;">foldism</h1>
 </div>
-    <p class="subtitle">Protein structure prediction with Boltz-2, Chai-1, Protenix, and AlphaFold2</p>
+    <p class="subtitle">Protein structure prediction with Boltz-2, Chai-1, Protenix, Protenix-mini, AlphaFold 2</p>
     <div class="panel">
         <h2>Input Sequence</h2>
         <form id="fold-form">
@@ -69,7 +66,7 @@
                 <label><input type="checkbox" name="method" value="boltz2"> Boltz-2</label>
                 <label><input type="checkbox" name="method" value="protenix"> Protenix</label>
                 <label><input type="checkbox" name="method" value="protenix-mini"> Protenix-Mini</label>
-                <label><input type="checkbox" name="method" value="alphafold2"> AlphaFold2</label>
+                <label><input type="checkbox" name="method" value="alphafold2"> AlphaFold 2</label>
             </div>
             <div style="margin: 8px 0; font-size: 13px; color: #666;">
                 <label style="cursor:pointer;"><input type="checkbox" id="use-msa" checked style="margin-right: 4px;">Use MSA</label>
