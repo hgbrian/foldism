@@ -274,20 +274,6 @@ def main(
     print(f"\n{'='*60}\nComplete! Results in: {run_dir}\n{'='*60}")
 
 
-@app.local_entrypoint()
-def test_cli(algorithms: str = "chai1"):
-    """Test CLI with a built-in Insulin sequence."""
-    test_fasta = """>Insulin
-GIVEQCCTSICSLYQLENYCN
->InsulinB
-FVNQHLCGSHLVEALYLVCGERGFFYTPKT
-"""
-    test_path = Path("test_insulin.faa")
-    test_path.write_text(test_fasta)
-    print(f"Created {test_path}")
-    main(str(test_path), algorithms=algorithms, run_name="test_insulin")
-
-
 # =============================================================================
 # Web Interface
 # =============================================================================
