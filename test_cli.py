@@ -15,6 +15,18 @@ if __name__ == "__main__":
     test_path.write_text(INSULIN_FASTA)
     print(f"Created {test_path}")
 
-    cmd = ["uv", "run", "modal", "run", "foldism.py", "--input-faa", str(test_path), "--algorithms", "chai1"]
+    cmd = [
+        "uv",
+        "run",
+        "--with",
+        "modal",
+        "modal",
+        "run",
+        "foldism.py",
+        "--input-faa",
+        str(test_path),
+        "--algorithms",
+        "chai1",
+    ]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd)
