@@ -14,22 +14,22 @@ uv run modal setup
 
 Run dev server or deploy
 ```bash
-uv run modal serve foldism.py
-uv run modal deploy foldism.py
+uv run --with modal modal serve foldism.py
+uv run --with modal modal deploy foldism.py
 ```
 
 ## Command line interface
 
 Examples
 ```bash
-uv run modal run foldism.py --input-faa input.faa
-uv run modal run foldism.py --input-faa input.faa --algorithms chai1,boltz2
-uv run modal run foldism.py --input-faa input.faa --no-use-msa  # skip MSA (faster)
+uv run --with modal modal run foldism.py --input-faa input.faa
+uv run --with modal modal run foldism.py --input-faa input.faa --algorithms chai1,boltz2
+uv run --with modal modal run foldism.py --input-faa input.faa --no-use-msa  # skip MSA (faster)
 ```
 
 Test
 ```bash
-python test_cli.py
+python --with modal test_cli.py
 ```
 
 ## Input Format
