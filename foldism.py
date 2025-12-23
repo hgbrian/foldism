@@ -1,31 +1,9 @@
-"""Multi-algorithm protein folding with CLI, TUI, and web interface.
+"""Multi-algorithm protein folding web interface.
 
-Uses backends.py for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
+Uses backends for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
 
-## Deploy
-
-```
-uv run modal deploy foldism.py
-```
-
-## 1. CLI Mode
-
-```
-uv run modal run foldism.py --input-faa test.faa --algorithms boltz2
-uv run modal run foldism.py --input-faa test.faa  # all methods
-```
-
-## 2. TUI Mode
-
-```
-uv run --with textual python foldism.py
-```
-
-## 3. Web Mode
-
-```
-uv run modal serve foldism.py  # dev
-```
+    uv run modal deploy foldism.py   # deploy
+    uv run modal serve foldism.py    # dev
 """
 
 from __future__ import annotations
@@ -296,6 +274,20 @@ def main(
     print(f"\n{'='*60}\nComplete! Results in: {run_dir}\n{'='*60}")
 
 
+@app.local_entrypoint()
+def test_cli(algorithms: str = "chai1"):
+    """Test CLI with a built-in Insulin sequence."""
+    test_fasta = """>Insulin
+GIVEQCCTSICSLYQLENYCN
+>InsulinB
+FVNQHLCGSHLVEALYLVCGERGFFYTPKT
+"""
+    test_path = Path("test_insulin.faa")
+    test_path.write_text(test_fasta)
+    print(f"Created {test_path}")
+    main(str(test_path), algorithms=algorithms, run_name="test_insulin")
+
+
 # =============================================================================
 # Web Interface
 # =============================================================================
@@ -395,59 +387,76 @@ HTML_TEMPLATE = """
             loadExamples();
         });
 
-        async function loadExamples() {
-            try {
-                const res = await fetch('/examples');
-                const data = await res.json();
-                const container = document.getElementById('examples-list');
-                if (!data.examples || data.examples.length === 0) {
-                    container.innerHTML = '<span style="color:#999;">none saved</span>';
-                    return;
-                }
-                container.innerHTML = data.examples.map(name =>
-                    `<a href="#" onclick="loadExample('${name}'); return false;">${name}</a><a href="#" onclick="deleteExample('${name}'); return false;" style="color:#999;margin-right:10px;text-decoration:none;" title="Delete ${name}">[×]</a>`
-                ).join('');
-            } catch (e) { console.error('Failed to load examples:', e); }
+        const defaultExamples = {
+            'Insulin': '>Insulin\\nGIVEQCCTSICSLYQLENYCN\\n>InsulinB\\nFVNQHLCGSHLVEALYLVCGERGFFYTPKT',
+            'GFP': '>GFP\\nMSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLTYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITLGMDELYK',
+            'Lysozyme': '>Lysozyme\\nKVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL'
+        };
+
+        function getExamples() {
+            try { return JSON.parse(localStorage.getItem('foldism-examples') || '{}'); }
+            catch (e) { return {}; }
         }
 
-        async function loadExample(name) {
-            try {
-                const res = await fetch('/examples/' + encodeURIComponent(name));
-                const data = await res.json();
-                if (data.fasta) document.getElementById('fasta-input').value = data.fasta;
-            } catch (e) { console.error('Failed to load example:', e); }
+        function saveExamples(examples) {
+            localStorage.setItem('foldism-examples', JSON.stringify(examples));
         }
 
-        async function saveCurrentSequence() {
+        function loadExamples() {
+            const container = document.getElementById('examples-list');
+            let html = Object.keys(defaultExamples).map(name =>
+                `<a href="#" onclick="loadExample('${name}'); return false;">${name}</a>`
+            ).join(' | ');
+            const userExamples = getExamples();
+            const userNames = Object.keys(userExamples).sort();
+            if (userNames.length > 0) {
+                html += ' | ' + userNames.map(name =>
+                    `<a href="#" onclick="loadExample('${name}'); return false;">${name}</a><a href="#" onclick="deleteExample('${name}'); return false;" style="color:#999;text-decoration:none;" title="Delete ${name}">[×]</a>`
+                ).join(' ');
+            }
+            container.innerHTML = html;
+        }
+
+        function loadExample(name) {
+            if (defaultExamples[name]) {
+                document.getElementById('fasta-input').value = defaultExamples[name];
+                return;
+            }
+            const examples = getExamples();
+            if (examples[name]) document.getElementById('fasta-input').value = examples[name];
+        }
+
+        function saveCurrentSequence() {
             const fasta = document.getElementById('fasta-input').value.trim();
             if (!fasta) { alert('No sequence to save'); return; }
-            try {
-                await fetch('/examples', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({fasta}) });
-                loadExamples();
-                document.getElementById('undo-btn').style.display = 'none';
-            } catch (e) { console.error('Failed to save:', e); }
+            const match = fasta.match(/^>([^\\n\\r]+)/);
+            let name = match ? match[1].split(/\\s/)[0].split('|')[0].substring(0, 30) : 'sequence';
+            name = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const examples = getExamples();
+            examples[name] = fasta;
+            saveExamples(examples);
+            loadExamples();
+            document.getElementById('undo-btn').style.display = 'none';
         }
 
         let lastDeleted = null;
-        async function deleteExample(name) {
-            try {
-                const res = await fetch('/examples/' + encodeURIComponent(name));
-                const data = await res.json();
-                if (data.fasta) lastDeleted = { name, fasta: data.fasta };
-                await fetch('/examples/' + encodeURIComponent(name), { method: 'DELETE' });
-                loadExamples();
-                document.getElementById('undo-btn').style.display = 'inline';
-            } catch (e) { console.error('Failed to delete:', e); }
+        function deleteExample(name) {
+            const examples = getExamples();
+            if (examples[name]) lastDeleted = { name, fasta: examples[name] };
+            delete examples[name];
+            saveExamples(examples);
+            loadExamples();
+            document.getElementById('undo-btn').style.display = 'inline';
         }
 
-        async function undoDelete() {
+        function undoDelete() {
             if (!lastDeleted) return;
-            try {
-                await fetch('/examples', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({fasta: lastDeleted.fasta}) });
-                lastDeleted = null;
-                document.getElementById('undo-btn').style.display = 'none';
-                loadExamples();
-            } catch (e) { console.error('Failed to undo:', e); }
+            const examples = getExamples();
+            examples[lastDeleted.name] = lastDeleted.fasta;
+            saveExamples(examples);
+            lastDeleted = null;
+            document.getElementById('undo-btn').style.display = 'none';
+            loadExamples();
         }
 
         // Track running methods for progressive dots
@@ -1631,76 +1640,6 @@ def web():
     def home():
         return render_template_string(HTML_TEMPLATE)
 
-    @flask_app.route("/examples", methods=["GET"])
-    def list_examples():
-        """List saved example sequences."""
-        from flask import jsonify
-        import re
-
-        examples_dir = Path("/cache/examples")
-        if not examples_dir.exists():
-            return jsonify({"examples": []})
-
-        CACHE_VOLUME.reload()
-        examples = sorted([f.stem for f in examples_dir.glob("*.fasta")])
-        return jsonify({"examples": examples})
-
-    @flask_app.route("/examples", methods=["POST"])
-    def save_example():
-        """Save current sequence as example."""
-        from flask import jsonify
-        import re
-
-        data = request.get_json()
-        fasta = data.get("fasta", "").strip()
-        if not fasta:
-            return jsonify({"error": "No sequence"}), 400
-
-        # Extract name from first header line
-        match = re.match(r">([^\n\r]+)", fasta)
-        if match:
-            name = match.group(1).split()[0].split("|")[0][:30]  # First word, max 30 chars
-            name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-        else:
-            name = "sequence"
-
-        examples_dir = Path("/cache/examples")
-        examples_dir.mkdir(parents=True, exist_ok=True)
-        (examples_dir / f"{name}.fasta").write_text(fasta)
-        CACHE_VOLUME.commit()
-
-        return jsonify({"name": name})
-
-    @flask_app.route("/examples/<name>", methods=["GET"])
-    def get_example(name):
-        """Get an example sequence."""
-        from flask import jsonify
-        import re
-
-        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-        fasta_path = Path(f"/cache/examples/{name}.fasta")
-
-        CACHE_VOLUME.reload()
-        if not fasta_path.exists():
-            return jsonify({"error": "Not found"}), 404
-
-        return jsonify({"fasta": fasta_path.read_text()})
-
-    @flask_app.route("/examples/<name>", methods=["DELETE"])
-    def delete_example(name):
-        """Delete an example sequence."""
-        from flask import jsonify
-        import re
-
-        name = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
-        fasta_path = Path(f"/cache/examples/{name}.fasta")
-
-        if fasta_path.exists():
-            fasta_path.unlink()
-            CACHE_VOLUME.commit()
-
-        return jsonify({"ok": True})
-
     @flask_app.route("/fold", methods=["POST"])
     def fold():
         """Spawn a folding job and return job_id (polling pattern to avoid 10-min SSE timeout)."""
@@ -1876,64 +1815,3 @@ def web():
         return send_file(BytesIO(session_files[filename]), mimetype=mimetype, download_name=filename)
 
     return flask_app
-
-
-# =============================================================================
-# TUI Mode
-# =============================================================================
-
-if __name__ == "__main__":
-    try:
-        from textual.app import App as TextualApp
-        from textual.app import ComposeResult
-        from textual.binding import Binding
-        from textual.widgets import Button, Footer, Header, Label, RichLog, TextArea
-
-        class FoldismTUI(TextualApp):
-            CSS = """
-            Screen { layout: vertical; }
-            #input-area { height: 12; margin: 1; }
-            #input-label { height: 1; }
-            #output-log { height: 1fr; margin: 1; border: solid $accent; }
-            #run-button { margin: 1; }
-            """
-            BINDINGS = [Binding("q", "quit", "Quit"), Binding("r", "run", "Run")]
-
-            def compose(self) -> ComposeResult:
-                yield Header()
-                yield Label("Paste FASTA sequence:", id="input-label")
-                yield TextArea(id="input-area")
-                yield Button("Run Boltz-2", id="run-button", variant="primary")
-                yield RichLog(id="output-log", wrap=True, markup=True)
-                yield Footer()
-
-            def action_quit(self) -> None:
-                raise SystemExit(0)
-
-            def on_button_pressed(self, event: Button.Pressed) -> None:
-                if event.button.id == "run-button":
-                    self.action_run()
-
-            def action_run(self) -> None:
-                log = self.query_one("#output-log", RichLog)
-                input_area = self.query_one("#input-area", TextArea)
-                fasta = input_area.text.strip()
-
-                if not fasta:
-                    log.write("[red]Error: No sequence entered[/]")
-                    return
-
-                log.write("[cyan]Starting Boltz-2 prediction...[/]")
-                log.write("[dim]This will use the deployed foldism app.[/]")
-                log.write("[dim]Run: uv run modal run foldism.py --input-faa <file>[/]")
-                log.write("")
-                log.write("[yellow]TUI is for quick preview. Use CLI for actual runs.[/]")
-
-        tui = FoldismTUI()
-        tui.run()
-
-    except ImportError:
-        print("TUI requires textual. Install with: pip install textual")
-        print("")
-        print("For CLI mode, run:")
-        print("  uv run modal run foldism.py --input-faa test.faa")
