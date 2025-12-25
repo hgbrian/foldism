@@ -170,37 +170,19 @@ def _fasta_to_boltz_yaml(fasta_str: str) -> str:
 
 
 def _fasta_to_chai_fasta(fasta_str: str) -> str:
-    lines = []
-    seen_names: dict[str, int] = {}
+    """Convert FASTA to Chai format with deterministic chain names based on sequence hash."""
     valid_chai_types = {"protein", "ligand", "dna", "rna"}
-
+    entries = []
     for seq_id, seq in fasta_iter(fasta_str):
-        # Check if already in valid Chai format (e.g., "protein|name=foo")
         parts = seq_id.split("|")
         first_part = parts[0].lower() if parts else ""
+        entity_type = first_part if first_part in valid_chai_types else "protein"
+        entries.append((entity_type, seq))
 
-        if first_part in valid_chai_types:
-            # Already valid Chai format, check for duplicate names
-            name_part = next((p for p in parts if p.startswith("name=")), None)
-            if name_part:
-                base_name = name_part.split("=", 1)[1]
-                if base_name in seen_names:
-                    seen_names[base_name] += 1
-                    new_name = f"{base_name}_{seen_names[base_name]}"
-                    seq_id = seq_id.replace(f"name={base_name}", f"name={new_name}")
-                else:
-                    seen_names[base_name] = 0
-        else:
-            # Not Chai format - convert to protein|name=...
-            # Use first part as name, sanitize it
-            base_name = re.sub(r'[|>\s]+', '_', seq_id).strip('_')[:50] or "protein"
-            if base_name in seen_names:
-                seen_names[base_name] += 1
-                seq_id = f"protein|name={base_name}_{seen_names[base_name]}"
-            else:
-                seen_names[base_name] = 0
-                seq_id = f"protein|name={base_name}"
-        lines.append(f">{seq_id}")
+    seq_hash = sha256(":".join(seq for _, seq in entries).encode()).hexdigest()[:6]
+    lines = []
+    for i, (entity_type, seq) in enumerate(entries):
+        lines.append(f">{entity_type}|name={seq_hash}_{i}")
         lines.append(seq)
     return "\n".join(lines)
 
@@ -235,34 +217,36 @@ def _fasta_to_protenix_json(input_faa: str, name: str = "input") -> str:
 def _fasta_to_af2_fasta(fasta_str: str) -> str:
     """Convert FASTA to AlphaFold2/ColabFold format.
 
-    Output format: >name
+    Output format: ><hash>
     SEQ1:SEQ2:SEQ3  (chains joined with colons on single line)
     """
-    sequences = list(fasta_iter(fasta_str))
-    if not sequences:
-        return fasta_str
-
-    # Use first header as name (sanitize for AF2)
-    first_header = sequences[0][0]
-    name = first_header.split("|")[-1] if "|" in first_header else first_header
-    name = re.sub(r'[^\w\-]', '_', name)[:50] or "protein"
-
-    # Join all sequences with colons (only protein sequences for AF2)
-    # Exclude only explicitly marked non-protein types (dna, rna, ligand)
     non_protein_types = {"dna", "rna", "ligand", "ion"}
     seqs = []
-    for seq_id, seq in sequences:
+    for seq_id, seq in fasta_iter(fasta_str):
         first_part = seq_id.split("|")[0].lower() if "|" in seq_id else ""
         if first_part not in non_protein_types:
             seqs.append(seq)
+    if not seqs:
+        return fasta_str
+    seq_hash = sha256(":".join(seqs).encode()).hexdigest()[:6]
+    return f">{seq_hash}\n{':'.join(seqs)}"
 
-    return f">{name}\n{':'.join(seqs)}"
+
+def _normalize_fasta(fasta_str: str) -> str:
+    """Normalize FASTA to use deterministic headers based on sequence hash."""
+    seqs = [(seq_id, seq) for seq_id, seq in fasta_iter(fasta_str)]
+    seq_hash = sha256(":".join(seq for _, seq in seqs).encode()).hexdigest()[:6]
+    lines = []
+    for i, (_, seq) in enumerate(seqs):
+        lines.append(f">{seq_hash}_{i}")
+        lines.append(seq)
+    return "\n".join(lines)
 
 
 CONVERTERS = {
     "boltz_yaml": _fasta_to_boltz_yaml,
     "chai_fasta": _fasta_to_chai_fasta,
-    "protenix_fasta": lambda s: s,
+    "protenix_fasta": _normalize_fasta,
     "af2_fasta": _fasta_to_af2_fasta,
 }
 

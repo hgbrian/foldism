@@ -43,7 +43,7 @@ alphafold_image = (
 @app.function(
     image=alphafold_image,
     timeout=TIMEOUT * 60,
-    gpu=GPU,
+    gpu="a100-80gb",  # A100-80GB for better JAX compatibility and more VRAM
     volumes={"/cache": CACHE_VOLUME},
 )
 def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: str | None = None) -> list:
@@ -56,6 +56,8 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
     from colabfold.download import default_data_dir
 
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"  # Limit JAX memory to 90%
+    os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
     os.environ["PYTHONUNBUFFERED"] = "1"
 
     # Set up logging early to capture all prints
@@ -100,20 +102,14 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
                 model_type="auto",
                 is_complex=is_complex,
                 data_dir=default_data_dir,
-                zip_results=True,
+                zip_results=False,
             )
 
-            run_name = Path(input_name).stem
-            result_zip = Path(out_dir) / f"{run_name}.result.zip"
-            if result_zip.exists():
-                outputs = [(Path(f"{run_name}.zip"), result_zip.read_bytes())]
-            else:
-                zip_buffer = BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for f in Path(out_dir).rglob("*"):
-                        if f.is_file():
-                            zf.write(f, f.relative_to(out_dir))
-                outputs = [(Path(f"{run_name}.zip"), zip_buffer.getvalue())]
+            outputs = [
+                (f.relative_to(out_dir), f.read_bytes())
+                for f in Path(out_dir).rglob("*")
+                if f.is_file()
+            ]
 
             cache_path.mkdir(parents=True, exist_ok=True)
             for rel_path, content in outputs:

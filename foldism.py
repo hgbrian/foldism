@@ -184,30 +184,29 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
         return result
 
     elif algo == "alphafold2":
-        import io
-        import zipfile
-
         result = {}
         for path, content in outputs:
-            if str(path).endswith(".zip") and content:
-                with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                    for name in zf.namelist():
-                        if "ranked_0.pdb" in name or (
-                            "rank_001" in name and name.endswith(".pdb")
-                        ):
-                            pdb_bytes = zf.read(name)
-                            result["structure.cif"] = _pdb_to_cif(pdb_bytes)
-                        elif "ranking_debug.json" in name:
-                            result["scores.json"] = zf.read(name)
+            path_str = str(path)
+            if not content:
+                continue
+            if "ranked_0.pdb" in path_str or ("rank_001" in path_str and path_str.endswith(".pdb")):
+                result["structure.cif"] = _pdb_to_cif(content)
+            elif "ranking_debug.json" in path_str:
+                result["scores.json"] = content
         return result
 
     return {}
 
 
 def _build_method_params(
-    method: str, converted_input: str, use_msa: bool, input_name: str = "foldism"
+    method: str, converted_input: str, use_msa: bool, input_name: str | None = None
 ) -> dict[str, Any]:
     """Build params dict for a method (centralized to avoid duplication)."""
+    # Extract hash from converted input for naming (first line after >)
+    if input_name is None:
+        first_line = converted_input.split("\n")[0]
+        input_name = first_line.lstrip(">").split("_")[0].split("|")[0] or "input"
+
     if method == "boltz2":
         # Boltz always uses MSA server
         return {"input_str": converted_input, "use_msa": True}
@@ -267,8 +266,8 @@ def main(
     input_faa: str,
     algorithms: str | None = None,
     run_name: str | None = None,
-    out_dir: str = "./out/fold",
-    keep_all: bool = False,
+    out_dir: str = "./out/foldism",
+    keep_all: bool = True,
     use_msa: bool = True,
 ):
     """Run multiple folding algorithms on the same input."""
@@ -321,6 +320,7 @@ def main(
 # =============================================================================
 # Web Interface (HTML template in index.html)
 # =============================================================================
+
 
 def _superpose_structures(
     structures: dict[str, bytes], reference_key: str | None = None
@@ -428,7 +428,7 @@ def fold_structure_web(
     """Run a single folding method for web interface."""
     try:
         converted = convert_for_app(fasta_str, method)
-        params = _build_method_params(method, converted, use_msa, "foldism")
+        params = _build_method_params(method, converted, use_msa)
 
         # Check cache first - avoids spawning GPU container if cached
         cached = _check_cache_inline(method, params)
@@ -542,32 +542,18 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 files["scores"] = content
 
     elif method == "alphafold2":
-        extracted_files = []
         for path, content in outputs:
-            if str(path).endswith(".zip") and content:
-                with zipfile.ZipFile(BytesIO(content), "r") as zf:
-                    print(f"[alphafold2] Zip contains: {zf.namelist()}")
-                    for name in zf.namelist():
-                        if name.endswith("/"):  # Skip directories
-                            continue
-                        file_content = zf.read(name)
-                        extracted_files.append((name, file_content))
-                        if "ranked_0.pdb" in name or (
-                            "rank_001" in name and name.endswith(".pdb")
-                        ):
-                            files["structure"] = (_pdb_to_cif(file_content), "cif")
-                            print(f"[alphafold2] Found structure: {name}")
-                        elif "ranking_debug.json" in name:
-                            files["scores"] = file_content
-                            print(f"[alphafold2] Found ranking_debug.json")
-                        elif "_scores_rank_001" in name and name.endswith(".json"):
-                            if "scores" not in files:
-                                files["scores"] = file_content
-                                print(f"[alphafold2] Found scores file: {name}")
-        # Use extracted files instead of the zip
-        if extracted_files:
-            files["all_files"] = extracted_files
-            return files if "structure" in files else None
+            path_str = str(path)
+            if not content:
+                continue
+            if "ranked_0.pdb" in path_str or ("rank_001" in path_str and path_str.endswith(".pdb")):
+                files["structure"] = (_pdb_to_cif(content), "cif")
+                print(f"[alphafold2] Found structure: {path_str}")
+            elif "ranking_debug.json" in path_str:
+                files["scores"] = content
+            elif "_scores_rank_001" in path_str and path_str.endswith(".json"):
+                if "scores" not in files:
+                    files["scores"] = content
 
     if "structure" not in files:
         return None
