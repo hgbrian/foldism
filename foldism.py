@@ -9,7 +9,9 @@ Uses backends for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from typing import Any
 
 from modal import Dict, Image, wsgi_app
 
@@ -25,9 +27,7 @@ from backends import (
     get_cache_subdir,
     protenix_predict,
 )
-
-# Job state storage for polling pattern (avoids 10-min SSE timeout)
-job_store = Dict.from_name("foldism-jobs", create_if_missing=True)
+from backends.common import job_store
 
 # =============================================================================
 # Web Image
@@ -101,10 +101,8 @@ def _parse_chai1_npz(npz_bytes: bytes) -> dict:
     return scores
 
 
-def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
-    if not outputs:
-        raise ValueError(f"{algo}: No output files")
-
+def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
+    """Find best model index for given algorithm based on confidence scores."""
     files = {str(path): content for path, content in outputs}
 
     if algo == "chai1":
@@ -116,22 +114,12 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 score = scores.get("aggregate_score", [0])[0]
                 if score > best_score:
                     best_score, best_idx = score, i
-
-        result = {}
-        cif_key = f"pred.model_idx_{best_idx}.cif"
-        if cif_key in files:
-            result["structure.cif"] = files[cif_key]
-        npz_key = f"scores.model_idx_{best_idx}.npz"
-        if npz_key in files:
-            scores = _parse_chai1_npz(files[npz_key])
-            result["scores.json"] = json.dumps(scores).encode()
-        return result
+        return best_idx
 
     elif algo == "boltz2":
         best_idx, best_score = 0, -float("inf")
         for path, content in outputs:
             path_str = str(path)
-            # Match both confidence_input_model_X.json and confidence_model_X.json
             if (
                 "confidence_" in path_str
                 and "_model_" in path_str
@@ -145,18 +133,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                         best_score, best_idx = score, idx
                 except:
                     pass
-
-        result = {}
-        for path, content in outputs:
-            path_str = str(path)
-            # Match both input_model_X.cif and model_X.cif
-            if f"_model_{best_idx}.cif" in path_str or path_str.endswith(
-                f"model_{best_idx}.cif"
-            ):
-                result["structure.cif"] = content
-            elif f"confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
-                result["scores.json"] = content
-        return result
+        return best_idx
 
     elif algo in ("protenix", "protenix-mini"):
         best_idx, best_score = 0, -float("inf")
@@ -173,18 +150,49 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                         best_score, best_idx = score, idx
                 except:
                     pass
+        return best_idx
 
-        result = {}
+    return 0
+
+
+def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
+    if not outputs:
+        raise ValueError(f"{algo}: No output files")
+
+    files = {str(path): content for path, content in outputs}
+    result = {}
+
+    if algo == "chai1":
+        best_idx = _find_best_model_index(algo, outputs)
+        cif_key = f"pred.model_idx_{best_idx}.cif"
+        if cif_key in files:
+            result["structure.cif"] = files[cif_key]
+        npz_key = f"scores.model_idx_{best_idx}.npz"
+        if npz_key in files:
+            scores = _parse_chai1_npz(files[npz_key])
+            result["scores.json"] = json.dumps(scores).encode()
+
+    elif algo == "boltz2":
+        best_idx = _find_best_model_index(algo, outputs)
+        for path, content in outputs:
+            path_str = str(path)
+            if f"_model_{best_idx}.cif" in path_str or path_str.endswith(
+                f"model_{best_idx}.cif"
+            ):
+                result["structure.cif"] = content
+            elif f"confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
+                result["scores.json"] = content
+
+    elif algo in ("protenix", "protenix-mini"):
+        best_idx = _find_best_model_index(algo, outputs)
         for path, content in outputs:
             path_str = str(path)
             if f"_sample_{best_idx}.cif" in path_str:
                 result["structure.cif"] = content
             elif f"summary_confidence_sample_{best_idx}.json" in path_str:
                 result["scores.json"] = content
-        return result
 
     elif algo == "alphafold2":
-        result = {}
         for path, content in outputs:
             path_str = str(path)
             if not content:
@@ -193,19 +201,20 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 result["structure.cif"] = _pdb_to_cif(content)
             elif "ranking_debug.json" in path_str:
                 result["scores.json"] = content
-        return result
 
-    return {}
+    return result
 
 
 def _build_method_params(
     method: str, converted_input: str, use_msa: bool, input_name: str | None = None
 ) -> dict[str, Any]:
     """Build params dict for a method (centralized to avoid duplication)."""
-    # Extract hash from converted input for naming (first line after >)
+    # Extract hash from converted input for naming
     if input_name is None:
         first_line = converted_input.split("\n")[0]
-        input_name = first_line.lstrip(">").split("_")[0].split("|")[0] or "input"
+        # Look for 6-char hex hash pattern, or fall back to "input"
+        match = re.search(r"[a-f0-9]{6}", first_line)
+        input_name = match.group(0) if match else "input"
 
     if method == "boltz2":
         # Boltz always uses MSA server
@@ -271,7 +280,8 @@ def main(
     use_msa: bool = True,
 ):
     """Run multiple folding algorithms on the same input."""
-    input_str = open(input_faa).read()
+    with open(input_faa) as f:
+        input_str = f.read()
 
     if run_name is None:
         run_name = Path(input_faa).stem
@@ -474,22 +484,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
     outputs_dict = {str(f): c for f, c in outputs}
 
     if method == "boltz2":
-        best_idx, best_score = 0, -float("inf")
-        for path, content in outputs:
-            path_str = str(path)
-            if (
-                "confidence_" in path_str
-                and "_model_" in path_str
-                and path_str.endswith(".json")
-            ):
-                try:
-                    scores = json.loads(content)
-                    score = scores.get("confidence_score", 0)
-                    idx = int(path_str.split("_model_")[1].split(".")[0])
-                    if score > best_score:
-                        best_score, best_idx = score, idx
-                except:
-                    pass
+        best_idx = _find_best_model_index(method, outputs)
         for path, content in outputs:
             path_str = str(path)
             if f"_model_{best_idx}.cif" in path_str or path_str.endswith(
@@ -500,17 +495,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 files["scores"] = content
 
     elif method == "chai1":
-        best_idx, best_score = 0, -float("inf")
-        for i in range(5):
-            key = f"scores.model_idx_{i}.npz"
-            if key in outputs_dict:
-                try:
-                    scores = _parse_chai1_npz(outputs_dict[key])
-                    score = scores.get("aggregate_score", [0])[0]
-                    if score > best_score:
-                        best_score, best_idx = score, i
-                except:
-                    pass
+        best_idx = _find_best_model_index(method, outputs)
         cif_key = f"pred.model_idx_{best_idx}.cif"
         if cif_key in outputs_dict:
             files["structure"] = (outputs_dict[cif_key], "cif")
@@ -520,20 +505,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
             files["scores"] = json.dumps(scores).encode()
 
     elif method in ("protenix", "protenix-mini"):
-        best_idx, best_score = 0, -float("inf")
-        for path, content in outputs:
-            path_str = str(path)
-            if "summary_confidence_sample_" in path_str and path_str.endswith(".json"):
-                try:
-                    scores = json.loads(content)
-                    score = scores.get("ranking_score", 0)
-                    idx = int(
-                        path_str.split("summary_confidence_sample_")[1].split(".")[0]
-                    )
-                    if score > best_score:
-                        best_score, best_idx = score, idx
-                except:
-                    pass
+        best_idx = _find_best_model_index(method, outputs)
         for path, content in outputs:
             path_str = str(path)
             if f"_sample_{best_idx}.cif" in path_str:
