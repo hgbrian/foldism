@@ -354,6 +354,12 @@
             if (method === 'Boltz-2') {
                 if (scores.confidence_score !== undefined) metrics.confidence = scores.confidence_score;
                 if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
+                // pLDDT: per-residue array, compute mean
+                if (scores.plddt !== undefined) {
+                    metrics.plddt = Array.isArray(scores.plddt)
+                        ? scores.plddt.reduce((a, b) => a + b, 0) / scores.plddt.length
+                        : scores.plddt;
+                }
                 // Extract per-chain ipTM from chain 0's perspective (A vs B, A vs C, etc)
                 if (scores.pair_chains_iptm && scores.pair_chains_iptm['0']) {
                     const chain0 = scores.pair_chains_iptm['0'];
@@ -367,6 +373,13 @@
             } else if (method === 'Chai-1') {
                 if (scores.aggregate_score) metrics.aggregate = Array.isArray(scores.aggregate_score) ? scores.aggregate_score[0] : scores.aggregate_score;
                 if (scores.ptm) metrics.ptm = Array.isArray(scores.ptm) ? scores.ptm[0] : scores.ptm;
+                // pLDDT: per-residue array, compute mean
+                if (scores.plddt !== undefined) {
+                    const plddt = Array.isArray(scores.plddt) && Array.isArray(scores.plddt[0]) ? scores.plddt[0] : scores.plddt;
+                    metrics.plddt = Array.isArray(plddt)
+                        ? plddt.reduce((a, b) => a + b, 0) / plddt.length
+                        : plddt;
+                }
                 // Extract per-chain ipTM from chain 0's perspective (A vs B, A vs C, etc)
                 // per_chain_pair_iptm is [num_chains, num_chains] - row 0 has chain 0 vs all others
                 if (scores.per_chain_pair_iptm && Array.isArray(scores.per_chain_pair_iptm)) {
