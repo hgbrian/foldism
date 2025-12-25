@@ -454,6 +454,13 @@ def _check_cache_inline(method: str, params: dict) -> list | None:
     ]
 
 
+def _check_cache(method: str, fasta_str: str, use_msa: bool) -> list | None:
+    """Check cache for method, converting input and building params."""
+    converted = convert_for_app(fasta_str, method)
+    params = _build_method_params(method, converted, use_msa)
+    return _check_cache_inline(method, params)
+
+
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def fold_structure_web(
     fasta_str: str, method: str, use_msa: bool = True, job_id: str | None = None
@@ -900,25 +907,7 @@ def _check_cache_inline_for_job(
     method: str, fasta_str: str, use_msa: bool
 ) -> list | None:
     """Check cache inline for job orchestrator."""
-    converted = convert_for_app(fasta_str, method)
-    params = _build_method_params(method, converted, use_msa, "foldism")
-
-    cache_key = get_cache_key(method, params)
-    cache_subdir = get_cache_subdir(method)
-    cache_path = Path(f"/cache/{cache_subdir}/{cache_key}")
-    cache_marker = cache_path / "_COMPLETE"
-
-    if not cache_marker.exists():
-        return None
-
-    print(f"[job-cache] {method} HIT: {cache_key}")
-    CACHE_VOLUME.reload()
-
-    return [
-        (str(f.relative_to(cache_path)), f.read_bytes())
-        for f in cache_path.glob("**/*")
-        if f.is_file() and f.name != "_COMPLETE"
-    ]
+    return _check_cache(method, fasta_str, use_msa)
 
 
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
@@ -936,51 +925,7 @@ def web():
         method: str, fasta_str: str, use_msa: bool
     ) -> list | None:
         """Check cache directly in the web server - no container spawn needed."""
-        converted = convert_for_app(fasta_str, method)
-
-        # Build params dict for cache key
-        if method == "boltz2":
-            params = {"input_str": converted, "use_msa": True}
-        elif method == "chai1":
-            params = {
-                "input_str": converted,
-                "input_name": "foldism.faa",
-                "use_msa_server": use_msa,
-            }
-        elif method == "protenix":
-            params = {
-                "input_str": converted,
-                "input_name": "foldism",
-                "use_msa": use_msa,
-            }
-        elif method == "protenix-mini":
-            params = {
-                "input_str": converted,
-                "input_name": "foldism",
-                "model": "protenix_mini",
-                "use_msa": use_msa,
-            }
-        elif method == "alphafold2":
-            params = {"input_str": converted, "input_name": "foldism.fasta"}
-        else:
-            return None
-
-        cache_key = get_cache_key(method, params)
-        cache_subdir = get_cache_subdir(method)
-        cache_path = Path(f"/cache/{cache_subdir}/{cache_key}")
-        cache_marker = cache_path / "_COMPLETE"
-
-        if not cache_marker.exists():
-            return None
-
-        print(f"[server-cache] {method} HIT: {cache_key}")
-        CACHE_VOLUME.reload()
-
-        return [
-            (str(f.relative_to(cache_path)), f.read_bytes())
-            for f in cache_path.glob("**/*")
-            if f.is_file() and f.name != "_COMPLETE"
-        ]
+        return _check_cache(method, fasta_str, use_msa)
 
     @flask_app.route("/", methods=["GET"])
     def home():
