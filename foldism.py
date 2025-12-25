@@ -8,8 +8,11 @@ Uses backends for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +53,26 @@ web_image = (
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def _build_result_payload(structure_bytes: bytes, fmt: str, files: dict, original_cif_bytes: bytes | None = None) -> dict:
+    """Build result payload dict with base64-encoded data."""
+    ext = "pdb" if fmt == "pdb" else "cif"
+    data_payload = {
+        "structure": base64.b64encode(structure_bytes).decode("ascii"),
+        "ext": ext,
+    }
+    if original_cif_bytes:
+        data_payload["original_cif"] = base64.b64encode(original_cif_bytes).decode("ascii")
+    if "scores" in files and files["scores"]:
+        data_payload["scores"] = base64.b64encode(files["scores"]).decode("ascii")
+    if "all_files" in files and files["all_files"]:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, content in files["all_files"]:
+                zf.writestr(name, content)
+        data_payload["zip"] = base64.b64encode(zip_buffer.getvalue()).decode("ascii")
+    return data_payload
 
 
 def _pdb_to_cif(pdb_bytes: bytes) -> bytes:
@@ -537,11 +560,8 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
     """Background orchestrator for folding jobs (avoids 10-min SSE timeout)."""
-    import base64
     import hashlib
-    import io
     import time
-    import zipfile
 
     def update_job(
         progress: int,
@@ -656,27 +676,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                         {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
                     )
 
-            ext = "pdb" if display_fmt == "pdb" else "cif"
-            data_payload = {
-                "structure": base64.b64encode(display_bytes).decode("ascii"),
-                "ext": ext,
-            }
-            if original_cif_bytes:
-                data_payload["original_cif"] = base64.b64encode(
-                    original_cif_bytes
-                ).decode("ascii")
-            if "scores" in files and files["scores"]:
-                data_payload["scores"] = base64.b64encode(files["scores"]).decode(
-                    "ascii"
-                )
-            if "all_files" in files and files["all_files"]:
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for name, content in files["all_files"]:
-                        zf.writestr(name, content)
-                data_payload["zip"] = base64.b64encode(zip_buffer.getvalue()).decode(
-                    "ascii"
-                )
+            data_payload = _build_result_payload(display_bytes, display_fmt, files, original_cif_bytes)
 
             result_to_send = [
                 {
@@ -789,30 +789,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                                 }
                             )
 
-                    # Build result payload
-                    ext = "pdb" if fmt == "pdb" else "cif"
-                    data_payload = {
-                        "structure": base64.b64encode(structure_bytes).decode("ascii"),
-                        "ext": ext,
-                    }
-                    if original_cif_bytes:
-                        data_payload["original_cif"] = base64.b64encode(
-                            original_cif_bytes
-                        ).decode("ascii")
-                    if "scores" in files and files["scores"]:
-                        data_payload["scores"] = base64.b64encode(
-                            files["scores"]
-                        ).decode("ascii")
-                    if "all_files" in files and files["all_files"]:
-                        zip_buffer = io.BytesIO()
-                        with zipfile.ZipFile(
-                            zip_buffer, "w", zipfile.ZIP_DEFLATED
-                        ) as zf:
-                            for name, content in files["all_files"]:
-                                zf.writestr(name, content)
-                        data_payload["zip"] = base64.b64encode(
-                            zip_buffer.getvalue()
-                        ).decode("ascii")
+                    data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
 
                     result_to_send = [
                         {
@@ -904,28 +881,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                     {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
                 )
 
-        ext = "pdb" if fmt == "pdb" else "cif"
-        data_payload = {
-            "structure": base64.b64encode(structure_bytes).decode("ascii"),
-            "ext": ext,
-        }
-
-        if original_cif_bytes:
-            data_payload["original_cif"] = base64.b64encode(original_cif_bytes).decode(
-                "ascii"
-            )
-
-        if "scores" in files and files["scores"]:
-            data_payload["scores"] = base64.b64encode(files["scores"]).decode("ascii")
-
-        if "all_files" in files and files["all_files"]:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                for name, content in files["all_files"]:
-                    zf.writestr(name, content)
-            data_payload["zip"] = base64.b64encode(zip_buffer.getvalue()).decode(
-                "ascii"
-            )
+        data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
 
         results.append(
             {
@@ -1174,32 +1130,9 @@ def web():
                         yield f"data: {json.dumps({'log': f'{method}: CIF to PDB failed: {e}', 'log_class': 'error'})}\n\n"
 
                 ext = "pdb" if fmt == "pdb" else "cif"
-                structure_b64 = base64.b64encode(structure_bytes).decode("ascii")
-                data_payload = {"structure": structure_b64, "ext": ext}
-
-                if original_cif_bytes:
-                    data_payload["original_cif"] = base64.b64encode(
-                        original_cif_bytes
-                    ).decode("ascii")
-
                 session_files[f"{result_id}.{ext}"] = structure_bytes
 
-                if "scores" in files and files["scores"]:
-                    data_payload["scores"] = base64.b64encode(files["scores"]).decode(
-                        "ascii"
-                    )
-
-                if "all_files" in files and files["all_files"]:
-                    import io
-                    import zipfile
-
-                    zip_buffer = io.BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-                        for name, content in files["all_files"]:
-                            zf.writestr(name, content)
-                    data_payload["zip"] = base64.b64encode(
-                        zip_buffer.getvalue()
-                    ).decode("ascii")
+                data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
 
                 yield f"data: {json.dumps({'progress': 100, 'status': 'Complete', 'result': {'method': FOLDING_APPS[method].name, 'method_key': method, 'data': data_payload, 'format': fmt}})}\n\n"
 
