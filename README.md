@@ -4,6 +4,8 @@ Multi-algorithm protein structure prediction using Modal serverless infrastructu
 
 Runs **Boltz-2**, **Chai-1**, **Protenix**, **Protenix-Mini**, and **AlphaFold2** on the same input, with automatic caching.
 
+![Foldism Screenshot](assets/foldism_screenshot.png)
+
 ## Quick Start
 
 Set up uv and modal (mac and linux)
