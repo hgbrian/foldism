@@ -14,7 +14,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uvx modal setup
 ```
 
-Run dev server or deploy
+Run dev server or deploy to Modal
 ```bash
 uvx modal serve foldism.py
 uvx modal deploy foldism.py
@@ -22,27 +22,12 @@ uvx modal deploy foldism.py
 
 ## Command Line Interface
 
-Create a test input file:
+Run basic tests on command line
 ```bash
 echo -e ">Insulin\nGIVEQCCTSICSLYQLENYCN\n>InsulinB\nFVNQHLCGSHLVEALYLVCGERGFFYTPKT" > input.faa
-```
-
-Run predictions:
-```bash
 uvx modal run foldism.py --input-faa input.faa
 uvx modal run foldism.py --input-faa input.faa --algorithms chai1,boltz2
 uvx modal run foldism.py --input-faa input.faa --no-use-msa  # skip MSA (faster)
-```
-
-## Input Format
-
-Standard FASTA. Only protein is supported for now:
-
-```
->Protein1
-MKTAYIAKQRQISFVKSH...
->Protein2
-GIVEQCCTSICSLYQLEN...
 ```
 
 ## Cost
