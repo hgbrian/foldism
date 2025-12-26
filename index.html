@@ -354,12 +354,7 @@
             if (method === 'Boltz-2') {
                 if (scores.confidence_score !== undefined) metrics.confidence = scores.confidence_score;
                 if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
-                // pLDDT: per-residue array, compute mean
-                if (scores.plddt !== undefined) {
-                    metrics.plddt = Array.isArray(scores.plddt)
-                        ? scores.plddt.reduce((a, b) => a + b, 0) / scores.plddt.length
-                        : scores.plddt;
-                }
+                if (scores.complex_plddt !== undefined) metrics.plddt = scores.complex_plddt;
                 // Extract per-chain ipTM from chain 0's perspective (A vs B, A vs C, etc)
                 if (scores.pair_chains_iptm && scores.pair_chains_iptm['0']) {
                     const chain0 = scores.pair_chains_iptm['0'];
@@ -395,6 +390,7 @@
             } else if (method === 'Protenix' || method === 'Protenix-Mini') {
                 if (scores.ranking_score !== undefined) metrics.ranking = scores.ranking_score;
                 if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
+                if (scores.plddt !== undefined) metrics.plddt = scores.plddt;
                 // Protenix may have pair_iptm similar to Boltz
                 if (scores.pair_iptm && typeof scores.pair_iptm === 'object') {
                     const chain0 = scores.pair_iptm['0'] || scores.pair_iptm[0];
