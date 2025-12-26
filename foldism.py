@@ -919,7 +919,34 @@ def web():
     from flask import Flask, Response, abort, request, send_file
 
     flask_app = Flask(__name__)
-    session_files: dict[str, bytes] = {}
+
+    # Simple session file cache with TTL cleanup
+    session_files: dict[str, tuple[float, bytes]] = {}
+    SESSION_TTL = 3600  # 1 hour
+    SESSION_MAX = 1000
+
+    def store_file(name: str, data: bytes):
+        import time
+        now = time.time()
+        # Cleanup expired
+        expired = [k for k, (ts, _) in session_files.items() if now - ts > SESSION_TTL]
+        for k in expired:
+            del session_files[k]
+        # Enforce max size
+        while len(session_files) >= SESSION_MAX:
+            oldest = min(session_files, key=lambda k: session_files[k][0])
+            del session_files[oldest]
+        session_files[name] = (now, data)
+
+    def get_file(name: str) -> bytes | None:
+        import time
+        if name not in session_files:
+            return None
+        ts, data = session_files[name]
+        if time.time() - ts > SESSION_TTL:
+            del session_files[name]
+            return None
+        return data
 
     def check_cache_in_server(
         method: str, fasta_str: str, use_msa: bool
@@ -1075,7 +1102,7 @@ def web():
                         yield f"data: {json.dumps({'log': f'{method}: CIF to PDB failed: {e}', 'log_class': 'error'})}\n\n"
 
                 ext = "pdb" if fmt == "pdb" else "cif"
-                session_files[f"{result_id}.{ext}"] = structure_bytes
+                store_file(f"{result_id}.{ext}", structure_bytes)
 
                 data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
 
@@ -1088,7 +1115,8 @@ def web():
 
     @flask_app.route("/result/<filename>")
     def get_result(filename):
-        if filename not in session_files:
+        data = get_file(filename)
+        if data is None:
             abort(404)
         mimetype = (
             "chemical/x-pdb"
@@ -1097,8 +1125,6 @@ def web():
             if filename.endswith(".zip")
             else "chemical/x-mmcif"
         )
-        return send_file(
-            BytesIO(session_files[filename]), mimetype=mimetype, download_name=filename
-        )
+        return send_file(BytesIO(data), mimetype=mimetype, download_name=filename)
 
     return flask_app
