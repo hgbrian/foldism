@@ -293,12 +293,15 @@ def chai1_cache_key(params: dict[str, Any]) -> str:
 def protenix_cache_key(params: dict[str, Any]) -> str:
     """Generate cache key for Protenix predictions."""
     input_hash = sha256(params.get("input_str", "").encode()).hexdigest()
+    model = params.get("model", "protenix")
+    model_version = "v0.5.0" if model == "protenix_mini" else "v1.0.0"
     cache_params = {
         "version": CACHE_VERSION,
         "input_hash": input_hash,
         "seeds": params.get("seeds", "42"),
         "use_msa": params.get("use_msa", True),
-        "model": params.get("model", "protenix"),
+        "model": model,
+        "model_version": model_version,
     }
     return sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]
 

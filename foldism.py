@@ -2,6 +2,7 @@
 
 Uses backends for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
 
+    uv run modal run foldism.py   # run
     uv run modal deploy foldism.py   # deploy
     uv run modal serve foldism.py    # dev
 """
@@ -267,25 +268,34 @@ def _build_method_params(
         raise ValueError(f"Unknown method: {method}")
 
 
+@app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def run_algorithm(
     algo: str, fasta_str: str, run_name: str, use_msa: bool = True
-) -> list[tuple]:
-    """Run a folding algorithm and return outputs."""
+) -> tuple[dict[str, bytes], list[tuple]]:
+    """Run a folding algorithm and return (best_files, all_outputs).
+
+    Runs on Modal with web_image so numpy/pyyaml are available.
+    """
     converted = convert_for_app(fasta_str, algo)
     params = _build_method_params(algo, converted, use_msa, run_name)
 
     if algo == "boltz2":
-        return boltz_predict.remote(params=params)
+        outputs = boltz_predict.remote(params=params)
     elif algo == "chai1":
-        return chai1_predict.remote(params=params)
+        outputs = chai1_predict.remote(params=params)
     elif algo == "protenix":
-        return protenix_predict.remote(params=params)
+        outputs = protenix_predict.remote(params=params)
     elif algo == "protenix-mini":
-        return protenix_predict.remote(params=params)
+        outputs = protenix_predict.remote(params=params)
     elif algo == "alphafold2":
-        return alphafold_predict.remote(params=params)
+        outputs = alphafold_predict.remote(params=params)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
+
+    best = _select_best_model(algo, outputs)
+    # Convert Path objects to strings for serialization
+    all_outputs = [(str(path), content) for path, content in outputs]
+    return best, all_outputs
 
 
 # =============================================================================
@@ -327,9 +337,8 @@ def main(
         app_def = FOLDING_APPS[algo]
         print(f"\n{'=' * 60}\nRunning {app_def.name}...\n{'=' * 60}")
 
-        outputs = run_algorithm(algo, input_str, run_name, use_msa=use_msa)
+        best, all_outputs = run_algorithm.remote(algo, input_str, run_name, use_msa=use_msa)
 
-        best = _select_best_model(algo, outputs)
         for key, content in best.items():
             ext = key.split(".")[-1]
             if key.startswith("structure"):
@@ -342,7 +351,7 @@ def main(
         if keep_all:
             algo_dir = run_dir / algo
             algo_dir.mkdir(parents=True, exist_ok=True)
-            for out_file, out_content in outputs:
+            for out_file, out_content in all_outputs:
                 out_path = algo_dir / out_file
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_bytes(out_content or b"")
