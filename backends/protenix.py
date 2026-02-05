@@ -25,14 +25,11 @@ from .common import (
 # =============================================================================
 
 
-def _download_protenix_base():
-    """Download protenix base model to VOLUME during image build."""
+def _setup_protenix_volume(prefix: str = "[protenix]") -> Path:
+    """Set up symlink from site-packages to volume. Returns volume_data path."""
     import shutil
     import site
-    import subprocess
-    from pathlib import Path
 
-    # Set up symlink from site-packages to volume
     site_pkg = Path(site.getsitepackages()[0])
     release_data = site_pkg / "release_data"
     volume_data = Path("/models/protenix_data")
@@ -42,85 +39,55 @@ def _download_protenix_base():
             shutil.rmtree(release_data)
         volume_data.mkdir(parents=True, exist_ok=True)
         release_data.symlink_to(volume_data)
-        print(f"[BUILD] Symlinked {release_data} -> {volume_data}")
+        print(f"{prefix} Symlinked {release_data} -> {volume_data}")
 
-    checkpoint_file = volume_data / "checkpoint" / "protenix_base_default_v0.5.0.pt"
-
-    if checkpoint_file.exists():
-        size = checkpoint_file.stat().st_size
-        print(f"[BUILD] Protenix base model already exists ({size:,} bytes)")
-        return
-
-    print("[BUILD] Downloading protenix base model to VOLUME...")
-    test_json = '[{"name": "test", "sequences": [{"proteinChain": {"sequence": "MAWTPLLLLLLSHCTGSLSQPVLTQPTSL", "count": 1}}]}]'
-    Path("/tmp/in_dm").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/out_dm").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/in_dm/test.json").write_text(test_json)
-
-    subprocess.run(
-        "protenix predict --input /tmp/in_dm/test.json --out_dir /tmp/out_dm --seeds 42 --use_msa false",
-        shell=True,
-        check=True,
-    )
-
-    if checkpoint_file.exists():
-        size = checkpoint_file.stat().st_size
-        print(f"[BUILD] Protenix base model downloaded successfully ({size:,} bytes)")
-    else:
-        raise RuntimeError("Protenix base model download failed!")
+    return volume_data
 
 
-def _download_protenix_mini():
-    """Download protenix-mini model to VOLUME during image build."""
-    import shutil
-    import site
+def _download_protenix_file(filepath: Path, url: str, prefix: str = "[protenix]") -> bool:
+    """Download a file if it doesn't exist. Returns True if downloaded."""
     import subprocess
-    from pathlib import Path
 
-    # Set up symlink from site-packages to volume
-    site_pkg = Path(site.getsitepackages()[0])
-    release_data = site_pkg / "release_data"
-    volume_data = Path("/models/protenix_data")
+    if filepath.exists():
+        print(f"{prefix} Already exists: {filepath.name} ({filepath.stat().st_size:,} bytes)")
+        return False
 
-    if not release_data.is_symlink():
-        if release_data.exists():
-            shutil.rmtree(release_data)
-        volume_data.mkdir(parents=True, exist_ok=True)
-        release_data.symlink_to(volume_data)
-        print(f"[BUILD] Symlinked {release_data} -> {volume_data}")
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    print(f"{prefix} Downloading {filepath.name}...")
+    subprocess.run(f'wget -q -O "{filepath}" "{url}"', shell=True, check=True)
 
-    checkpoint_file = volume_data / "checkpoint" / "protenix_mini_default_v0.5.0.pt"
+    if not filepath.exists():
+        raise RuntimeError(f"Download failed: {filepath}")
+    print(f"{prefix} Downloaded: {filepath.name} ({filepath.stat().st_size:,} bytes)")
+    return True
 
-    if checkpoint_file.exists():
-        size = checkpoint_file.stat().st_size
-        print(f"[BUILD] Protenix-mini model already exists ({size:,} bytes)")
-        return
 
-    print("[BUILD] Downloading protenix-mini model to VOLUME...")
-    test_json = '[{"name": "test", "sequences": [{"proteinChain": {"sequence": "MAWTPLLLLLLSHCTGSLSQPVLTQPTSL", "count": 1}}]}]'
-    Path("/tmp/in_dm").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/out_dm").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/in_dm/test.json").write_text(test_json)
+def _download_protenix_models():
+    """Download protenix models and common files to VOLUME during image build."""
+    from protenix.web_service.dependency_url import URL as PROTENIX_URLS
 
-    subprocess.run(
-        'protenix predict --input /tmp/in_dm/test.json --out_dir /tmp/out_dm --seeds 42 --use_msa false --model_name "protenix_mini_default_v0.5.0"',
-        shell=True,
-        check=True,
-    )
+    volume_data = _setup_protenix_volume(prefix="[BUILD]")
+    checkpoint_dir = volume_data / "checkpoint"
+    ccd_dir = volume_data / "ccd_cache"
 
-    if checkpoint_file.exists():
-        size = checkpoint_file.stat().st_size
-        print(f"[BUILD] Protenix-mini model downloaded successfully ({size:,} bytes)")
-    else:
-        raise RuntimeError("Protenix-mini model download failed!")
+    downloads = [
+        (checkpoint_dir / "protenix_base_default_v1.0.0.pt", PROTENIX_URLS["protenix_base_default_v1.0.0"]),
+        (checkpoint_dir / "protenix_mini_default_v0.5.0.pt", PROTENIX_URLS["protenix_mini_default_v0.5.0"]),
+        (ccd_dir / "components.cif", PROTENIX_URLS["ccd_components_file"]),
+        (ccd_dir / "components.cif.rdkit_mol.pkl", PROTENIX_URLS["ccd_components_rdkit_mol_file"]),
+        (ccd_dir / "clusters-by-entity-40.txt", PROTENIX_URLS["pdb_cluster_file"]),
+    ]
+
+    for filepath, url in downloads:
+        _download_protenix_file(filepath, url, prefix="[BUILD]")
 
 
 protenix_image = (
-    Image.debian_slim()
-    .apt_install("git", "wget")
-    .pip_install("polars==1.19.0", "protenix==0.6.1")
-    .run_function(_download_protenix_base, gpu="L40S", volumes={"/models": MODEL_VOLUME})
-    .run_function(_download_protenix_mini, gpu="L40S", volumes={"/models": MODEL_VOLUME})
+    Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.12")
+    .apt_install("git", "wget", "clang")
+    .env({"CUDA_HOME": "/usr/local/cuda"})
+    .pip_install("polars==1.19.0", "protenix==1.0.0")
+    .run_function(_download_protenix_models, gpu="L40S", volumes={"/models": MODEL_VOLUME})
 )
 
 # =============================================================================
@@ -129,55 +96,23 @@ protenix_image = (
 
 
 def _ensure_protenix_models(model: str = "protenix"):
-    """Ensure Protenix models exist on volume (download if missing)."""
-    import shutil
-    import site
-    import subprocess
-
-    # Reload volume to see latest data
+    """Verify Protenix models exist on volume (should be pre-downloaded at image build)."""
     MODEL_VOLUME.reload()
-
-    # Set up symlink from site-packages to volume
-    site_pkg = Path(site.getsitepackages()[0])
-    release_data = site_pkg / "release_data"
-    volume_data = Path("/models/protenix_data")
-
-    if not release_data.is_symlink():
-        if release_data.exists():
-            if not volume_data.exists():
-                shutil.move(str(release_data), str(volume_data))
-            else:
-                shutil.rmtree(release_data)
-        volume_data.mkdir(parents=True, exist_ok=True)
-        release_data.symlink_to(volume_data)
-        print(f"[protenix] Symlinked {release_data} -> {volume_data}")
+    volume_data = _setup_protenix_volume()
 
     if model == "protenix_mini":
         checkpoint_file = volume_data / "checkpoint" / "protenix_mini_default_v0.5.0.pt"
-        model_name = "protenix_mini_default_v0.5.0"
     else:
-        checkpoint_file = volume_data / "checkpoint" / "protenix_base_default_v0.5.0.pt"
-        model_name = None
+        checkpoint_file = volume_data / "checkpoint" / "protenix_base_default_v1.0.0.pt"
 
-    # Check if model exists on volume
     if checkpoint_file.exists():
-        print(f"[protenix] Model found on volume: {model}")
+        print(f"[protenix] Model found: {checkpoint_file.name}")
         return
 
-    # Download model to volume if missing
-    print(f"[protenix] Model not on volume, downloading: {model}")
-    Path("/tmp/in_dm").mkdir(parents=True, exist_ok=True)
-    Path("/tmp/out_dm").mkdir(parents=True, exist_ok=True)
-    test_json = '[{"name": "test", "sequences": [{"proteinChain": {"sequence": "MAWTPLLLLLLSHCTGSLSQPVLTQPTSL", "count": 1}}]}]'
-    Path("/tmp/in_dm/test.json").write_text(test_json)
-
-    cmd = "protenix predict --input /tmp/in_dm/test.json --out_dir /tmp/out_dm --seeds 42 --use_msa false"
-    if model_name:
-        cmd += f' --model_name "{model_name}"'
-
-    subprocess.run(cmd, shell=True, check=True)
-    MODEL_VOLUME.commit()
-    print(f"[protenix] Model downloaded to volume: {model}")
+    raise RuntimeError(
+        f"Model not found: {checkpoint_file}. "
+        "Rebuild with: uv run modal run --force-build foldism.py"
+    )
 
 
 # =============================================================================
@@ -232,9 +167,8 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         json_path.write_text(input_str)
 
         use_msa_str = "true" if use_msa else "false"
-        cmd = f'stdbuf -oL protenix predict --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str}'
-        if model == "protenix_mini":
-            cmd += ' --model_name "protenix_mini_default_v0.5.0"'
+        model_name = "protenix_mini_default_v0.5.0" if model == "protenix_mini" else "protenix_base_default_v1.0.0"
+        cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{model_name}"'
         print(f"Running: {cmd}")
         write_log_line(job_id, log_key, f"Command: {cmd}", model)
 
