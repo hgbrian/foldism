@@ -22,7 +22,7 @@ job_store = Dict.from_name("foldism-jobs", create_if_missing=True)
 
 # GPU configuration - L40S default, configurable via environment
 GPU = os.environ.get("GPU", "L40S")
-TIMEOUT = int(os.environ.get("TIMEOUT", 15))  # 15 minutes default
+TIMEOUT = int(os.environ.get("TIMEOUT", 60))  # 60 minutes default
 CACHE_VERSION = "v1"
 
 # =============================================================================
