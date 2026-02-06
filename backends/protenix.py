@@ -21,6 +21,13 @@ from .common import (
 )
 
 # =============================================================================
+# Model Configuration
+# =============================================================================
+
+PROTENIX_BASE_MODEL = "protenix_base_20250630_v1.0.0"
+PROTENIX_MINI_MODEL = "protenix_mini_default_v0.5.0"
+
+# =============================================================================
 # Image
 # =============================================================================
 
@@ -71,15 +78,32 @@ def _download_protenix_models():
     ccd_dir = volume_data / "ccd_cache"
 
     downloads = [
-        (checkpoint_dir / "protenix_base_default_v1.0.0.pt", PROTENIX_URLS["protenix_base_default_v1.0.0"]),
-        (checkpoint_dir / "protenix_mini_default_v0.5.0.pt", PROTENIX_URLS["protenix_mini_default_v0.5.0"]),
+        (checkpoint_dir / f"{PROTENIX_BASE_MODEL}.pt", PROTENIX_URLS[PROTENIX_BASE_MODEL]),
+        (checkpoint_dir / f"{PROTENIX_MINI_MODEL}.pt", PROTENIX_URLS[PROTENIX_MINI_MODEL]),
         (ccd_dir / "components.cif", PROTENIX_URLS["ccd_components_file"]),
         (ccd_dir / "components.cif.rdkit_mol.pkl", PROTENIX_URLS["ccd_components_rdkit_mol_file"]),
         (ccd_dir / "clusters-by-entity-40.txt", PROTENIX_URLS["pdb_cluster_file"]),
+        (ccd_dir / "obsolete_release_date.csv", PROTENIX_URLS["obsolete_release_data_csv"]),
     ]
 
     for filepath, url in downloads:
         _download_protenix_file(filepath, url, prefix="[BUILD]")
+
+    # Run a minimal prediction to trigger CUDA kernel compilation (cached in image)
+    import subprocess
+    print("[BUILD] Warming up protenix (compiling CUDA kernels)...")
+    test_json = '[{"name": "test", "sequences": [{"proteinChain": {"sequence": "MKTAYIAKQRQISFVKSH", "count": 1}}]}]'
+    Path("/tmp/warmup").mkdir(parents=True, exist_ok=True)
+    Path("/tmp/warmup/test.json").write_text(test_json)
+
+    cmd = f'protenix pred --input /tmp/warmup/test.json --out_dir /tmp/warmup_out --seeds 42 --use_msa false --model_name "{PROTENIX_BASE_MODEL}"'
+    print(f"[BUILD] Running: {cmd}")
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    print(f"[BUILD] stdout: {result.stdout}")
+    print(f"[BUILD] stderr: {result.stderr}")
+    if result.returncode != 0:
+        raise RuntimeError(f"Warmup failed with code {result.returncode}: {result.stderr}")
+    print("[BUILD] CUDA kernels compiled")
 
 
 protenix_image = (
@@ -87,7 +111,7 @@ protenix_image = (
     .apt_install("git", "wget", "clang")
     .env({"CUDA_HOME": "/usr/local/cuda"})
     .pip_install("polars==1.19.0", "protenix==1.0.0")
-    .run_function(_download_protenix_models, gpu="L40S", volumes={"/models": MODEL_VOLUME})
+    .run_function(_download_protenix_models, gpu="L40S", volumes={"/models": MODEL_VOLUME}, timeout=3600)
 )
 
 # =============================================================================
@@ -100,10 +124,8 @@ def _ensure_protenix_models(model: str = "protenix"):
     MODEL_VOLUME.reload()
     volume_data = _setup_protenix_volume()
 
-    if model == "protenix_mini":
-        checkpoint_file = volume_data / "checkpoint" / "protenix_mini_default_v0.5.0.pt"
-    else:
-        checkpoint_file = volume_data / "checkpoint" / "protenix_base_default_v1.0.0.pt"
+    model_name = PROTENIX_MINI_MODEL if model == "protenix_mini" else PROTENIX_BASE_MODEL
+    checkpoint_file = volume_data / "checkpoint" / f"{model_name}.pt"
 
     if checkpoint_file.exists():
         print(f"[protenix] Model found: {checkpoint_file.name}")
@@ -167,7 +189,7 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         json_path.write_text(input_str)
 
         use_msa_str = "true" if use_msa else "false"
-        model_name = "protenix_mini_default_v0.5.0" if model == "protenix_mini" else "protenix_base_default_v1.0.0"
+        model_name = PROTENIX_MINI_MODEL if model == "protenix_mini" else PROTENIX_BASE_MODEL
         cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{model_name}"'
         print(f"Running: {cmd}")
         write_log_line(job_id, log_key, f"Command: {cmd}", model)
