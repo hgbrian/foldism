@@ -27,8 +27,11 @@ Run basic tests on command line
 echo -e ">Insulin\nGIVEQCCTSICSLYQLENYCN\n>InsulinB\nFVNQHLCGSHLVEALYLVCGERGFFYTPKT" > input.faa
 uvx modal run foldism.py --input-faa input.faa
 uvx modal run foldism.py --input-faa input.faa --algorithms chai1,boltz2
-uvx modal run foldism.py --input-faa input.faa --no-use-msa  # skip MSA (faster)
+uvx modal run foldism.py --input-faa input.faa --no-use-msa  # faster but lower quality
 ```
+
+## Warning
+- Protenix's msa server is sometimes very slow, and this can cause Protenix to run for hours, potentially
 
 ## Cost
 - Modal currently gives you $30 per month free to experiment with
