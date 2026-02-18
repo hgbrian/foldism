@@ -117,7 +117,6 @@ FOLDING_APPS: dict[str, FoldingApp] = {
     "boltz2": FoldingApp("Boltz-2", "boltz2", "Boltz-2 structure prediction", "boltz_yaml"),
     "chai1": FoldingApp("Chai-1", "chai1", "Chai-1 structure prediction", "chai_fasta"),
     "protenix": FoldingApp("Protenix", "protenix", "Protenix (AlphaFold3-style)", "protenix_fasta"),
-    "protenix-mini": FoldingApp("Protenix-Mini", "protenix-mini", "Protenix Mini (fast)", "protenix_fasta"),
     "alphafold2": FoldingApp("AlphaFold2", "alphafold2", "AlphaFold2/ColabFold", "af2_fasta"),
 }
 
@@ -293,15 +292,13 @@ def chai1_cache_key(params: dict[str, Any]) -> str:
 def protenix_cache_key(params: dict[str, Any]) -> str:
     """Generate cache key for Protenix predictions."""
     input_hash = sha256(params.get("input_str", "").encode()).hexdigest()
-    model = params.get("model", "protenix")
-    model_version = "v0.5.0" if model == "protenix_mini" else "v1.0.0"
     cache_params = {
         "version": CACHE_VERSION,
         "input_hash": input_hash,
         "seeds": params.get("seeds", "42"),
         "use_msa": params.get("use_msa", True),
-        "model": model,
-        "model_version": model_version,
+        "model": "protenix",
+        "model_version": "v1.0.0",
     }
     return sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -324,7 +321,7 @@ def get_cache_key(method: str, params: dict[str, Any]) -> str:
         return boltz_cache_key(params)
     elif method == "chai1":
         return chai1_cache_key(params)
-    elif method in ("protenix", "protenix-mini"):
+    elif method == "protenix":
         return protenix_cache_key(params)
     elif method == "alphafold2":
         return alphafold_cache_key(params)
@@ -338,7 +335,7 @@ def get_cache_subdir(method: str) -> str:
         return "boltz2"
     elif method == "chai1":
         return "chai1"
-    elif method in ("protenix", "protenix-mini"):
+    elif method == "protenix":
         return "protenix"
     elif method == "alphafold2":
         return "alphafold2"
