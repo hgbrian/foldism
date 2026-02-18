@@ -2,7 +2,7 @@
 
 Multi-algorithm protein structure prediction using Modal serverless infrastructure.
 
-Runs **Boltz-2**, **Chai-1**, **Protenix**, **Protenix-Mini**, **AlphaFold2**.
+Runs **Boltz-2**, **Chai-1**, **Protenix**, **AlphaFold2**.
 
 ![Foldism Screenshot](assets/foldism_screenshot.png)
 
@@ -35,7 +35,7 @@ uvx modal run foldism.py --input-faa input.faa --no-use-msa  # faster but lower 
 
 ## Cost
 - Modal currently gives you $30 per month free to experiment with
-- A run with all 5 methods can cost **$1 or more** depending on sequence length (GPUs cost $1-4 per hour)
+- A run with all 4 methods can cost **$1 or more** depending on sequence length (GPUs cost $1-4 per hour)
 - Results are cached, so re-running the same sequence is almost free
 - If you `modal deploy`, the URL is publicly available (anyone who finds it can use it)
 - If you want to require users to authenticate, set up a [custom domain](https://modal.com/docs/guide/webhook-urls).

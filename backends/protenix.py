@@ -25,7 +25,6 @@ from .common import (
 # =============================================================================
 
 PROTENIX_BASE_MODEL = "protenix_base_20250630_v1.0.0"
-PROTENIX_MINI_MODEL = "protenix_mini_default_v0.5.0"
 
 # =============================================================================
 # Image
@@ -79,7 +78,6 @@ def _download_protenix_models():
 
     downloads = [
         (checkpoint_dir / f"{PROTENIX_BASE_MODEL}.pt", PROTENIX_URLS[PROTENIX_BASE_MODEL]),
-        (checkpoint_dir / f"{PROTENIX_MINI_MODEL}.pt", PROTENIX_URLS[PROTENIX_MINI_MODEL]),
         (ccd_dir / "components.cif", PROTENIX_URLS["ccd_components_file"]),
         (ccd_dir / "components.cif.rdkit_mol.pkl", PROTENIX_URLS["ccd_components_rdkit_mol_file"]),
         (ccd_dir / "clusters-by-entity-40.txt", PROTENIX_URLS["pdb_cluster_file"]),
@@ -107,10 +105,10 @@ def _download_protenix_models():
 
 
 protenix_image = (
-    Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.12")
+    Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "wget", "clang")
     .env({"CUDA_HOME": "/usr/local/cuda"})
-    .pip_install("polars==1.19.0", "protenix==1.0.0")
+    .pip_install("protenix==1.0.4")
     .run_function(_download_protenix_models, gpu="L40S", volumes={"/models": MODEL_VOLUME}, timeout=3600)
 )
 
@@ -119,13 +117,12 @@ protenix_image = (
 # =============================================================================
 
 
-def _ensure_protenix_models(model: str = "protenix"):
+def _ensure_protenix_models():
     """Verify Protenix models exist on volume (should be pre-downloaded at image build)."""
     MODEL_VOLUME.reload()
     volume_data = _setup_protenix_volume()
 
-    model_name = PROTENIX_MINI_MODEL if model == "protenix_mini" else PROTENIX_BASE_MODEL
-    checkpoint_file = volume_data / "checkpoint" / f"{model_name}.pt"
+    checkpoint_file = volume_data / "checkpoint" / f"{PROTENIX_BASE_MODEL}.pt"
 
     if checkpoint_file.exists():
         print(f"[protenix] Model found: {checkpoint_file.name}")
@@ -157,29 +154,27 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     input_name = params.get("input_name", "input")
     seeds = params.get("seeds", "42")
     use_msa = params.get("use_msa", True)
-    model = params.get("model", "protenix")  # "protenix" or "protenix_mini"
 
-    # Determine log key based on model
-    log_key = "protenix_logs" if model == "protenix" else "protenix_mini_logs"
+    log_key = "protenix_logs"
 
     # Check models exist (read-only to allow parallel execution)
-    write_log_line(job_id, log_key, f"[{model}] Checking models...", model)
-    _ensure_protenix_models(model)
+    write_log_line(job_id, log_key, "[protenix] Checking models...", "protenix")
+    _ensure_protenix_models()
 
     cache_key = protenix_cache_key(params)
     cache_path = Path(f"/cache/protenix/{cache_key}")
     cache_marker = cache_path / "_COMPLETE"
 
     if not overwrite and cache_marker.exists():
-        msg = f"[{model}] Cache HIT: {cache_key} (returning cached result)"
+        msg = f"[protenix] Cache HIT: {cache_key} (returning cached result)"
         print(msg)
-        write_log_line(job_id, log_key, msg, model)
+        write_log_line(job_id, log_key, msg, "protenix")
         CACHE_VOLUME.reload()
         return [(f.relative_to(cache_path), f.read_bytes()) for f in cache_path.glob("**/*") if f.is_file() and f.name != "_COMPLETE"]
 
-    msg = f"[{model}] Cache MISS: {cache_key} (use_msa={use_msa})"
+    msg = f"[protenix] Cache MISS: {cache_key} (use_msa={use_msa})"
     print(msg)
-    write_log_line(job_id, log_key, msg, model)
+    write_log_line(job_id, log_key, msg, "protenix")
 
     if input_str.strip().startswith(">"):
         input_str = _fasta_to_protenix_json(input_str, input_name)
@@ -189,10 +184,9 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         json_path.write_text(input_str)
 
         use_msa_str = "true" if use_msa else "false"
-        model_name = PROTENIX_MINI_MODEL if model == "protenix_mini" else PROTENIX_BASE_MODEL
-        cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{model_name}"'
+        cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{PROTENIX_BASE_MODEL}"'
         print(f"Running: {cmd}")
-        write_log_line(job_id, log_key, f"Command: {cmd}", model)
+        write_log_line(job_id, log_key, f"Command: {cmd}", "protenix")
 
         # Use Popen to capture output in real-time with batched log writes
         import time
@@ -221,7 +215,7 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
                     existing[log_key] = logs[-1000:]
                     job_store[job_id] = existing
                 except Exception as e:
-                    print(f"[{model}] Failed to flush logs: {e}")
+                    print(f"[protenix] Failed to flush logs: {e}")
                 log_buffer = []
             last_flush = time.time()
 

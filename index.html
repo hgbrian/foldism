@@ -56,7 +56,7 @@
   </svg>
   <h1 style="color: #333; font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; margin: 0;">foldism</h1>
 </div>
-    <p class="subtitle">Protein structure prediction with Boltz-2, Chai-1, Protenix, Protenix-mini, AlphaFold 2</p>
+    <p class="subtitle">Protein structure prediction with Boltz-2, Chai-1, Protenix, AlphaFold 2</p>
     <div class="panel">
         <h2>Input Sequence</h2>
         <form id="fold-form">
@@ -65,7 +65,6 @@
                 <label><input type="checkbox" name="method" value="chai1" checked> Chai-1</label>
                 <label><input type="checkbox" name="method" value="boltz2"> Boltz-2</label>
                 <label><input type="checkbox" name="method" value="protenix"> Protenix</label>
-                <label><input type="checkbox" name="method" value="protenix-mini"> Protenix-Mini</label>
                 <label><input type="checkbox" name="method" value="alphafold2"> AlphaFold 2</label>
             </div>
             <div style="margin: 8px 0; font-size: 13px; color: #666;">
@@ -98,7 +97,7 @@
     <script>
         let stage = null;
         let loadedComponents = {};
-        const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'Protenix-Mini': '#A855F7', 'AlphaFold2': '#F59E0B'};
+        const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B'};
 
         document.addEventListener("DOMContentLoaded", function () {
             stage = new NGL.Stage("viewer-container", { backgroundColor: "white" });
@@ -186,7 +185,6 @@
             'boltz2': { name: 'Boltz-2', prefix: '[Boltz]' },
             'chai1': { name: 'Chai-1', prefix: '[Chai-1]' },
             'protenix': { name: 'Protenix', prefix: '[Protenix]' },
-            'protenix-mini': { name: 'Protenix-Mini', prefix: '[Protenix-Mini]' },
             'alphafold2': { name: 'AlphaFold2', prefix: '[AlphaFold2]' }
         };
 
@@ -240,7 +238,6 @@
                 '[Boltz]': { key: 'boltz2', name: 'Boltz-2' },
                 '[Chai-1]': { key: 'chai1', name: 'Chai-1' },
                 '[Protenix]': { key: 'protenix', name: 'Protenix' },
-                '[Protenix-Mini]': { key: 'protenix-mini', name: 'Protenix-Mini' },
                 '[AlphaFold2]': { key: 'alphafold2', name: 'AlphaFold2' }
             };
 
@@ -387,7 +384,7 @@
                 } else if (scores.iptm) {
                     metrics.iptm = Array.isArray(scores.iptm) ? scores.iptm[0] : scores.iptm;
                 }
-            } else if (method === 'Protenix' || method === 'Protenix-Mini') {
+            } else if (method === 'Protenix') {
                 if (scores.ranking_score !== undefined) metrics.ranking = scores.ranking_score;
                 if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
                 if (scores.plddt !== undefined) metrics.plddt = scores.plddt;

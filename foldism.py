@@ -159,7 +159,7 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     pass
         return best_idx
 
-    elif algo in ("protenix", "protenix-mini"):
+    elif algo == "protenix":
         best_idx, best_score = 0, -float("inf")
         for path, content in outputs:
             path_str = str(path)
@@ -207,7 +207,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
             elif f"confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
                 result["scores.json"] = content
 
-    elif algo in ("protenix", "protenix-mini"):
+    elif algo == "protenix":
         best_idx = _find_best_model_index(algo, outputs)
         for path, content in outputs:
             path_str = str(path)
@@ -255,13 +255,6 @@ def _build_method_params(
             "input_name": input_name,
             "use_msa": use_msa,
         }
-    elif method == "protenix-mini":
-        return {
-            "input_str": converted_input,
-            "input_name": input_name,
-            "model": "protenix_mini",
-            "use_msa": use_msa,
-        }
     elif method == "alphafold2":
         return {"input_str": converted_input, "input_name": f"{input_name}.fasta"}
     else:
@@ -284,8 +277,6 @@ def run_algorithm(
     elif algo == "chai1":
         outputs = chai1_predict.remote(params=params)
     elif algo == "protenix":
-        outputs = protenix_predict.remote(params=params)
-    elif algo == "protenix-mini":
         outputs = protenix_predict.remote(params=params)
     elif algo == "alphafold2":
         outputs = alphafold_predict.remote(params=params)
@@ -490,8 +481,6 @@ def fold_structure_web(
             outputs = chai1_predict.remote(params=params, job_id=job_id)
         elif method == "protenix":
             outputs = protenix_predict.remote(params=params, job_id=job_id)
-        elif method == "protenix-mini":
-            outputs = protenix_predict.remote(params=params, job_id=job_id)
         elif method == "alphafold2":
             outputs = alphafold_predict.remote(params=params, job_id=job_id)
         else:
@@ -543,7 +532,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
             scores = _parse_chai1_npz(outputs_dict[npz_key])
             files["scores"] = json.dumps(scores).encode()
 
-    elif method in ("protenix", "protenix-mini"):
+    elif method == "protenix":
         best_idx = _find_best_model_index(method, outputs)
         for path, content in outputs:
             path_str = str(path)
@@ -844,7 +833,6 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                 ("boltz2", "boltz_logs", "Boltz"),
                 ("chai1", "chai1_logs", "Chai-1"),
                 ("protenix", "protenix_logs", "Protenix"),
-                ("protenix-mini", "protenix_mini_logs", "Protenix-Mini"),
                 ("alphafold2", "alphafold2_logs", "AlphaFold2"),
             ]
 
