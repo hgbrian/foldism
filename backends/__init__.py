@@ -13,9 +13,10 @@ from .common import (
     get_cache_key,
     get_cache_subdir,
 )
-from .alphafold import alphafold_predict
-from .boltz import boltz_predict
+from .alphafold2 import alphafold_predict
+from .boltz import boltz2_predict
 from .chai1 import chai1_predict
+from .colabsearch import colabsearch_fetch
 from .protenix import protenix_predict
 
 __all__ = [
@@ -23,9 +24,10 @@ __all__ = [
     "FOLDING_APPS",
     "alphafold_predict",
     "app",
-    "boltz_predict",
+    "boltz2_predict",
     "chai1_predict",
     "check_cache",
+    "colabsearch_fetch",
     "convert_for_app",
     "get_cache_key",
     "get_cache_subdir",
