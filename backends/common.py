@@ -142,7 +142,7 @@ def fasta_iter(s: str):
 # =============================================================================
 
 
-def _fasta_to_boltz_yaml(fasta_str: str) -> str:
+def _fasta_to_boltz_yaml(fasta_str: str, msa_paths: dict[str, str] | None = None) -> str:
     import yaml
 
     chains = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -162,7 +162,10 @@ def _fasta_to_boltz_yaml(fasta_str: str) -> str:
             chain_id = chains[n] if n < len(chains) else f"chain_{n}"
         if entity_type == "protein":
             assert all(aa.upper() in ALLOWED_AAS for aa in seq), f"Invalid AAs: {seq}"
-        entity = {entity_type: {"id": chain_id, "sequence": seq}}
+        chain_dict: dict[str, Any] = {"id": chain_id, "sequence": seq}
+        if entity_type == "protein" and msa_paths and seq in msa_paths:
+            chain_dict["msa"] = msa_paths[seq]
+        entity = {entity_type: chain_dict}
         yaml_dict["sequences"].append(entity)
 
     return yaml.dump(yaml_dict, sort_keys=False)
@@ -189,7 +192,12 @@ def _fasta_to_chai_fasta(fasta_str: str) -> str:
 PROTENIX_ENTITY_MAP = {"protein": "proteinChain", "dna": "dnaSequence", "rna": "rnaSequence", "ligand": "ligand", "ion": "ion"}
 
 
-def _fasta_to_protenix_json(input_faa: str, name: str = "input") -> str:
+def _fasta_to_protenix_json(
+    input_faa: str,
+    name: str = "input",
+    msa_paths: dict[str, str] | None = None,
+    msa_result: dict | None = None,
+) -> str:
     sequences = []
 
     for seq_id, seq in fasta_iter(input_faa):
@@ -207,7 +215,15 @@ def _fasta_to_protenix_json(input_faa: str, name: str = "input") -> str:
         if entity_type == "ligand":
             entity = {protenix_type: {"ligand": seq, "count": 1}}
         else:
-            entity = {protenix_type: {"sequence": seq, "count": 1}}
+            chain_dict: dict[str, Any] = {"sequence": seq, "count": 1}
+            if entity_type == "protein":
+                if msa_result and seq in msa_result.get("unpaired", {}):
+                    chain_dict["unpairedMsaPath"] = f"{msa_result['unpaired'][seq]}/merged.a3m"
+                    if msa_result.get("paired_dir"):
+                        chain_dict["pairedMsaPath"] = f"{msa_result['paired_dir']}/pair.a3m"
+                elif msa_paths and seq in msa_paths:
+                    chain_dict["unpairedMsaPath"] = msa_paths[seq]
+            entity = {protenix_type: chain_dict}
         sequences.append(entity)
 
     return json.dumps([{"name": name, "sequences": sequences}], indent=2)

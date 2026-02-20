@@ -24,8 +24,9 @@ from backends import (
     FOLDING_APPS,
     alphafold_predict,
     app,
-    boltz_predict,
+    boltz2_predict,
     chai1_predict,
+    colabsearch_fetch,
     convert_for_app,
     get_cache_key,
     get_cache_subdir,
@@ -229,8 +230,34 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
     return result
 
 
+def _extract_protein_sequences(fasta_str: str) -> list[str]:
+    """Extract unique protein sequences from FASTA (skipping non-protein entities)."""
+    from backends.common import ALLOWED_AAS, fasta_iter
+
+    seen = set()
+    result = []
+    for seq_id, seq in fasta_iter(fasta_str):
+        first_part = seq_id.split("|")[0].lower() if "|" in seq_id else ""
+        if first_part in {"dna", "rna", "ligand", "ion"}:
+            continue
+        if seq not in seen and all(aa.upper() in ALLOWED_AAS for aa in seq):
+            seen.add(seq)
+            result.append(seq)
+    return result
+
+
+def _fetch_msas(protein_seqs: list[str]) -> dict:
+    """Pre-fetch unpaired + paired MSAs via ColabSearch. Returns MsaResult dict."""
+    if not protein_seqs:
+        return {}
+    print(f"Fetching MSAs for {len(protein_seqs)} unique protein sequences...")
+    return colabsearch_fetch.remote(protein_seqs)
+
+
 def _build_method_params(
-    method: str, converted_input: str, use_msa: bool, input_name: str | None = None
+    method: str, converted_input: str, use_msa: bool, input_name: str | None = None,
+    msa_paths: dict[str, str] | None = None,
+    msa_result: dict | None = None, original_fasta: str | None = None,
 ) -> dict[str, Any]:
     """Build params dict for a method (centralized to avoid duplication)."""
     # Extract hash from converted input for naming
@@ -241,45 +268,65 @@ def _build_method_params(
         input_name = match.group(0) if match else "input"
 
     if method == "boltz2":
-        # Boltz always uses MSA server
-        return {"input_str": converted_input, "use_msa": True}
+        params = {"input_str": converted_input, "use_msa": True}
+        if msa_result:
+            params["msa_result"] = msa_result
+            if original_fasta:
+                params["original_fasta"] = original_fasta
+        elif msa_paths:
+            params["msa_paths"] = msa_paths
+        return params
     elif method == "chai1":
-        return {
+        params = {
             "input_str": converted_input,
             "input_name": f"{input_name}.faa",
             "use_msa_server": use_msa,
         }
+        if msa_result:
+            params["msa_result"] = msa_result
+        return params
     elif method == "protenix":
-        return {
+        params = {
             "input_str": converted_input,
             "input_name": input_name,
             "use_msa": use_msa,
         }
+        if msa_result:
+            params["msa_result"] = msa_result
+        elif msa_paths:
+            params["msa_paths"] = msa_paths
+        return params
     elif method == "alphafold2":
-        return {"input_str": converted_input, "input_name": f"{input_name}.fasta"}
+        params: dict[str, Any] = {"input_str": converted_input, "input_name": f"{input_name}.fasta"}
+        if msa_result:
+            params["msa_result"] = msa_result
+        return params
     else:
         raise ValueError(f"Unknown method: {method}")
 
 
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def run_algorithm(
-    algo: str, fasta_str: str, run_name: str, use_msa: bool = True
+    algo: str, fasta_str: str, run_name: str, use_msa: bool = True,
+    msa_paths: dict[str, str] | None = None,
+    msa_result: dict | None = None,
+    overwrite: bool = False,
 ) -> tuple[dict[str, bytes], list[tuple]]:
     """Run a folding algorithm and return (best_files, all_outputs).
 
     Runs on Modal with web_image so numpy/pyyaml are available.
     """
     converted = convert_for_app(fasta_str, algo)
-    params = _build_method_params(algo, converted, use_msa, run_name)
+    params = _build_method_params(algo, converted, use_msa, run_name, msa_paths=msa_paths, msa_result=msa_result, original_fasta=fasta_str)
 
     if algo == "boltz2":
-        outputs = boltz_predict.remote(params=params)
+        outputs = boltz2_predict.remote(params=params, overwrite=overwrite)
     elif algo == "chai1":
-        outputs = chai1_predict.remote(params=params)
+        outputs = chai1_predict.remote(params=params, overwrite=overwrite)
     elif algo == "protenix":
-        outputs = protenix_predict.remote(params=params)
+        outputs = protenix_predict.remote(params=params, overwrite=overwrite)
     elif algo == "alphafold2":
-        outputs = alphafold_predict.remote(params=params)
+        outputs = alphafold_predict.remote(params=params, overwrite=overwrite)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
@@ -299,9 +346,10 @@ def main(
     input_faa: str,
     algorithms: str | None = None,
     run_name: str | None = None,
-    out_dir: str = "./out/foldism",
+    out_dir: str = "./out",
     keep_all: bool = True,
     use_msa: bool = True,
+    overwrite: bool = False,
 ):
     """Run multiple folding algorithms on the same input."""
     with open(input_faa) as f:
@@ -321,14 +369,33 @@ def main(
     run_dir = Path(out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pre-fetch MSAs for backends that support it (boltz2, protenix, chai1)
+    msa_result = None
+    msa_backends = [a for a in algos_to_run if a in ("boltz2", "protenix", "chai1", "alphafold2")]
+    if not use_msa and msa_backends:
+        print(f"Warning: --no-use-msa set; {', '.join(msa_backends)} will use their own MSA servers (slower, not cached)")
+    needs_colabsearch = use_msa and bool(msa_backends)
+    if needs_colabsearch:
+        protein_seqs = _extract_protein_sequences(input_str)
+        if protein_seqs:
+            msa_result = _fetch_msas(protein_seqs)
+
     print(f"Running: {', '.join(algos_to_run)}")
     print(f"Output: {run_dir}")
 
+    # Launch all algorithms in parallel
+    handles = []
     for algo in algos_to_run:
-        app_def = FOLDING_APPS[algo]
-        print(f"\n{'=' * 60}\nRunning {app_def.name}...\n{'=' * 60}")
+        print(f"  Spawning {FOLDING_APPS[algo].name}...")
+        handle = run_algorithm.spawn(algo, input_str, run_name, use_msa=use_msa, msa_result=msa_result, overwrite=overwrite)
+        handles.append((algo, handle))
 
-        best, all_outputs = run_algorithm.remote(algo, input_str, run_name, use_msa=use_msa)
+    # Collect results as they complete
+    for algo, handle in handles:
+        app_def = FOLDING_APPS[algo]
+        print(f"\n{'=' * 60}\n{app_def.name} finished\n{'=' * 60}")
+
+        best, all_outputs = handle.get()
 
         for key, content in best.items():
             ext = key.split(".")[-1]
@@ -463,12 +530,14 @@ def _check_cache(method: str, fasta_str: str, use_msa: bool) -> list | None:
 
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def fold_structure_web(
-    fasta_str: str, method: str, use_msa: bool = True, job_id: str | None = None
+    fasta_str: str, method: str, use_msa: bool = True, job_id: str | None = None,
+    msa_paths: dict[str, str] | None = None,
+    msa_result: dict | None = None,
 ) -> tuple[str, dict | None, str | None]:
     """Run a single folding method for web interface."""
     try:
         converted = convert_for_app(fasta_str, method)
-        params = _build_method_params(method, converted, use_msa)
+        params = _build_method_params(method, converted, use_msa, msa_paths=msa_paths, msa_result=msa_result, original_fasta=fasta_str)
 
         # Check cache first - avoids spawning GPU container if cached
         cached = _check_cache_inline(method, params)
@@ -476,7 +545,7 @@ def fold_structure_web(
             print(f"[{method}] Returning cached result ({len(cached)} files)")
             outputs = [(Path(f), c) for f, c in cached]
         elif method == "boltz2":
-            outputs = boltz_predict.remote(params=params, job_id=job_id)
+            outputs = boltz2_predict.remote(params=params, job_id=job_id)
         elif method == "chai1":
             outputs = chai1_predict.remote(params=params, job_id=job_id)
         elif method == "protenix":
@@ -593,6 +662,19 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
     logs = [{"msg": "Checking cache...", "cls": "info"}]
     update_job(5, f"Starting {total} methods...", logs)
 
+    # Pre-fetch MSAs for backends that support it
+    msa_result = None
+    needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2"))
+    if needs_colabsearch:
+        protein_seqs = _extract_protein_sequences(fasta)
+        if protein_seqs:
+            logs.append({"msg": f"Fetching MSAs for {len(protein_seqs)} sequences...", "cls": "info"})
+            update_job(5, "Fetching MSAs...", logs)
+            msa_result = _fetch_msas(protein_seqs)
+            n_cached = len(msa_result.get("unpaired", {}))
+            logs.append({"msg": f"MSAs ready ({n_cached} sequences cached)", "cls": "success"})
+            update_job(8, f"Starting {total} methods...", logs)
+
     # Check cache for each method first
     cached_results = {}
     methods_to_run = []
@@ -622,7 +704,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
     # Spawn only methods that need computation
     handles = []
     for method in methods_to_run:
-        handle = fold_structure_web.spawn(fasta, method, use_msa, job_id)
+        handle = fold_structure_web.spawn(fasta, method, use_msa, job_id, msa_result=msa_result)
         handles.append((method, handle))
 
     all_results = {}
@@ -1013,6 +1095,17 @@ def web():
             total = len(methods)
             yield f"data: {json.dumps({'progress': 5, 'status': f'Starting {total} methods...', 'log': f'Checking cache...', 'log_class': 'info'})}\n\n"
 
+            # Pre-fetch MSAs for backends that support it
+            msa_result = None
+            needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2"))
+            if needs_colabsearch:
+                protein_seqs = _extract_protein_sequences(fasta)
+                if protein_seqs:
+                    yield f"data: {json.dumps({'log': f'Fetching MSAs for {len(protein_seqs)} sequences...', 'log_class': 'info'})}\n\n"
+                    msa_result = _fetch_msas(protein_seqs)
+                    n_cached = len(msa_result.get("unpaired", {}))
+                    yield f"data: {json.dumps({'log': f'MSAs ready ({n_cached} sequences cached)', 'log_class': 'success'})}\n\n"
+
             # Check cache for each method first (instant, no container spawn)
             cached_results = {}
             methods_to_run = []
@@ -1027,7 +1120,7 @@ def web():
             # Spawn only methods that need computation
             handles = []
             for method in methods_to_run:
-                handle = fold_structure_web.spawn(fasta, method, use_msa)
+                handle = fold_structure_web.spawn(fasta, method, use_msa, msa_result=msa_result)
                 handles.append((method, handle))
                 yield f"data: {json.dumps({'log': f'Running {FOLDING_APPS[method].name}', 'log_class': 'dim', 'method_key': method})}\n\n"
 

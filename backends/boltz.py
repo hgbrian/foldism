@@ -20,6 +20,7 @@ from .common import (
     write_log_line,
 )
 
+
 # =============================================================================
 # Image
 # =============================================================================
@@ -88,7 +89,7 @@ boltz_image = (
     gpu=GPU,
     volumes={"/models": MODEL_VOLUME, "/cache": CACHE_VOLUME},
 )
-def boltz_predict(params: dict[str, Any], overwrite: bool = False, job_id: str | None = None) -> list:
+def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str | None = None) -> list:
     """Run Boltz-2 structure prediction."""
     import os
     import subprocess
@@ -99,10 +100,10 @@ def boltz_predict(params: dict[str, Any], overwrite: bool = False, job_id: str |
 
     input_str = params["input_str"]
     use_msa = params.get("use_msa", True)
+    msa_paths = params.get("msa_paths")
+    msa_result = params.get("msa_result")
+    original_fasta = params.get("original_fasta")
     params_str = params.get("params_str", BOLTZ_BASE_PARAMS)
-    # Boltz always requires MSAs - either pre-computed or from server
-    # Since we don't provide pre-computed MSAs, always use MSA server
-    params_str = f"--use_msa_server {params_str}"
 
     cache_key = boltz_cache_key(params)
     cache_path = Path(f"/cache/boltz2/{cache_key}")
@@ -119,10 +120,25 @@ def boltz_predict(params: dict[str, Any], overwrite: bool = False, job_id: str |
     print(msg)
     write_log_line(job_id, "boltz_logs", msg, "boltz2")
 
-    if input_str.strip().startswith(">"):
-        input_str = _fasta_to_boltz_yaml(input_str)
-
     with TemporaryDirectory() as in_dir, TemporaryDirectory() as out_dir:
+        # Point YAML msa: fields to cached A3M files on volume
+        if msa_result and original_fasta:
+            msa_paths = {}
+            for seq in msa_result.get("sequences", []):
+                unpaired_dir = msa_result.get("unpaired", {}).get(seq)
+                if unpaired_dir:
+                    msa_paths[seq] = f"{unpaired_dir}/merged.a3m"
+            input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths=msa_paths)
+            print(f"[boltz2] Using pre-fetched A3M MSAs for {len(msa_paths)} chains")
+        elif msa_paths:
+            if input_str.strip().startswith(">"):
+                input_str = _fasta_to_boltz_yaml(input_str, msa_paths=msa_paths)
+            # Don't add --use_msa_server since MSAs are pre-computed
+        else:
+            if input_str.strip().startswith(">"):
+                input_str = _fasta_to_boltz_yaml(input_str)
+            params_str = f"--use_msa_server {params_str}"
+
         input_path = Path(in_dir) / "input.yaml"
         input_path.write_text(input_str)
 
