@@ -36,6 +36,8 @@
         .metric-value.good { color: #16a34a; }
         .metric-value.medium { color: #ca8a04; }
         .metric-value.poor { color: #dc2626; }
+        .metric[data-tip] { cursor: help; border-bottom: 1px dotted #999; position: relative; }
+        .metric[data-tip]:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; max-width: 350px; white-space: normal; z-index: 1000; margin-bottom: 4px; }
         .example-link { font-size: 13px; color: #666; margin-top: 10px; }
         .example-link a { color: #2563eb; }
     </style>
@@ -318,7 +320,7 @@
 
         function formatMetric(value, label, tooltip) {
             if (value === undefined || value === null) return '';
-            const titleAttr = tooltip ? ` title="${tooltip}"` : '';
+            const titleAttr = tooltip ? ` data-tip="${tooltip}"` : '';
             // Handle array of values (e.g., multi-chain ipTM)
             if (Array.isArray(value)) {
                 const formatted = value.map(v => {
@@ -441,10 +443,10 @@
                 if (metrics.iptm !== undefined) html += formatMetric(metrics.iptm, 'ipTM');
             }
             if (metrics.ptm !== undefined) html += formatMetric(metrics.ptm, 'pTM');
-            if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence');
             const compositeTooltip = numChains <= 1
                 ? '0.8*ipTM + 0.2*pTM -- low for monomers because ipTM is 0 (no interface). Use pLDDT and pTM instead.'
                 : '0.8*ipTM + 0.2*pTM';
+            if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence', compositeTooltip);
             if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'ranking', compositeTooltip);
             if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'aggregate', compositeTooltip);
             return html ? `<span class="metrics">${html}</span>` : '';
