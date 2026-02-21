@@ -316,8 +316,9 @@
             }
         }
 
-        function formatMetric(value, label) {
+        function formatMetric(value, label, tooltip) {
             if (value === undefined || value === null) return '';
+            const titleAttr = tooltip ? ` title="${tooltip}"` : '';
             // Handle array of values (e.g., multi-chain ipTM)
             if (Array.isArray(value)) {
                 const formatted = value.map(v => {
@@ -329,7 +330,7 @@
                 if (formatted.length === 0) return '';
                 const avgVal = value.reduce((a, b) => a + (typeof b === 'number' ? b : parseFloat(b)), 0) / value.length;
                 const colorClass = avgVal >= 0.8 ? 'good' : avgVal >= 0.5 ? 'medium' : 'poor';
-                return `<span class="metric"><span class="metric-label">${label}:</span><span class="metric-value ${colorClass}">${formatted.join(', ')}</span></span>`;
+                return `<span class="metric"${titleAttr}><span class="metric-label">${label}:</span><span class="metric-value ${colorClass}">${formatted.join(', ')}</span></span>`;
             }
             let numVal = typeof value === 'number' ? value : parseFloat(value);
             if (isNaN(numVal)) return '';
@@ -337,7 +338,7 @@
             if (numVal > 1) numVal /= 100;
             const displayVal = numVal.toFixed(2);
             const colorClass = numVal >= 0.8 ? 'good' : numVal >= 0.5 ? 'medium' : 'poor';
-            return `<span class="metric"><span class="metric-label">${label}:</span><span class="metric-value ${colorClass}">${displayVal}</span></span>`;
+            return `<span class="metric"${titleAttr}><span class="metric-label">${label}:</span><span class="metric-value ${colorClass}">${displayVal}</span></span>`;
         }
 
         function countChains(fasta) {
@@ -440,9 +441,12 @@
                 if (metrics.iptm !== undefined) html += formatMetric(metrics.iptm, 'ipTM');
             }
             if (metrics.ptm !== undefined) html += formatMetric(metrics.ptm, 'pTM');
-            if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'conf');
-            if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'rank');
-            if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'agg');
+            if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence');
+            const compositeTooltip = numChains <= 1
+                ? '0.8*ipTM + 0.2*pTM -- low for monomers because ipTM is 0 (no interface). Use pLDDT and pTM instead.'
+                : '0.8*ipTM + 0.2*pTM';
+            if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'ranking', compositeTooltip);
+            if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'aggregate', compositeTooltip);
             return html ? `<span class="metrics">${html}</span>` : '';
         }
 

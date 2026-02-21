@@ -104,6 +104,44 @@ def _download_protenix_models():
     print("[BUILD] CUDA kernels compiled")
 
 
+# =============================================================================
+# MSA Format Conversion
+# =============================================================================
+
+
+def _split_paired_a3m(content: str, num_chains: int) -> list[str]:
+    """Split combined paired A3M into per-chain A3M strings.
+
+    The pair.a3m has chain sections marked by >101, >102, etc.
+    Returns one A3M string per chain, with chain ID headers replaced by >query.
+    Hit headers (with taxonomy info) are preserved for cross-chain pairing.
+    """
+    blocks: dict[int, list[str]] = {i: [] for i in range(num_chains)}
+    current_chain: int | None = None
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith(">"):
+            first_field = stripped[1:].split("\t")[0].strip()
+            try:
+                chain_id = int(first_field)
+                if 101 <= chain_id < 101 + num_chains:
+                    current_chain = chain_id - 101
+                    blocks[current_chain].append(">query")
+                    continue
+            except ValueError:
+                pass
+            if current_chain is not None:
+                blocks[current_chain].append(stripped)
+        else:
+            if current_chain is not None:
+                blocks[current_chain].append(stripped)
+
+    return ["\n".join(blocks.get(i, [])) + "\n" for i in range(num_chains)]
+
+
 protenix_image = (
     Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "wget", "clang")
@@ -178,10 +216,27 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     print(msg)
     write_log_line(job_id, log_key, msg, "protenix")
 
-    if input_str.strip().startswith(">"):
-        input_str = _fasta_to_protenix_json(input_str, input_name, msa_paths=msa_paths, msa_result=msa_result)
-
     with TemporaryDirectory() as in_dir, TemporaryDirectory() as out_dir:
+        # Protenix expects per-chain paired A3M files — split the combined pair.a3m
+        if msa_result and msa_result.get("paired_dir"):
+            pair_path = Path(msa_result["paired_dir"]) / "pair.a3m"
+            if pair_path.exists():
+                per_chain = _split_paired_a3m(
+                    pair_path.read_text().replace("\x00", ""),
+                    len(msa_result["sequences"]),
+                )
+                msa_result = dict(msa_result)  # shallow copy
+                paired_per_chain = {}
+                for chain_idx, (seq, a3m) in enumerate(zip(msa_result["sequences"], per_chain)):
+                    chain_file = Path(in_dir) / f"paired_chain_{chain_idx}.a3m"
+                    chain_file.write_text(a3m)
+                    paired_per_chain[seq] = str(chain_file)
+                msa_result["paired_per_chain"] = paired_per_chain
+                print(f"[protenix] Split paired A3M into {len(paired_per_chain)} per-chain files")
+
+        if input_str.strip().startswith(">"):
+            input_str = _fasta_to_protenix_json(input_str, input_name, msa_paths=msa_paths, msa_result=msa_result)
+
         json_path = Path(in_dir) / "input.json"
         json_path.write_text(input_str)
 

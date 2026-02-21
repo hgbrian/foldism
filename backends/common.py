@@ -219,7 +219,9 @@ def _fasta_to_protenix_json(
             if entity_type == "protein":
                 if msa_result and seq in msa_result.get("unpaired", {}):
                     chain_dict["unpairedMsaPath"] = f"{msa_result['unpaired'][seq]}/merged.a3m"
-                    if msa_result.get("paired_dir"):
+                    if seq in msa_result.get("paired_per_chain", {}):
+                        chain_dict["pairedMsaPath"] = msa_result["paired_per_chain"][seq]
+                    elif msa_result.get("paired_dir"):
                         chain_dict["pairedMsaPath"] = f"{msa_result['paired_dir']}/pair.a3m"
                 elif msa_paths and seq in msa_paths:
                     chain_dict["unpairedMsaPath"] = msa_paths[seq]
