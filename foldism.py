@@ -671,8 +671,10 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
             logs.append({"msg": f"Fetching MSAs for {len(protein_seqs)} sequences...", "cls": "info"})
             update_job(5, "Fetching MSAs...", logs)
             msa_result = _fetch_msas(protein_seqs)
-            n_cached = len(msa_result.get("unpaired", {}))
-            logs.append({"msg": f"MSAs ready ({n_cached} sequences cached)", "cls": "success"})
+            n_unpaired = len(msa_result.get("unpaired", {}))
+            has_paired = bool(msa_result.get("paired_dir"))
+            paired_str = ", paired" if has_paired else ""
+            logs.append({"msg": f"MSAs ready ({n_unpaired} unpaired{paired_str})", "cls": "success"})
             update_job(8, f"Starting {total} methods...", logs)
 
     # Check cache for each method first
@@ -1103,8 +1105,10 @@ def web():
                 if protein_seqs:
                     yield f"data: {json.dumps({'log': f'Fetching MSAs for {len(protein_seqs)} sequences...', 'log_class': 'info'})}\n\n"
                     msa_result = _fetch_msas(protein_seqs)
-                    n_cached = len(msa_result.get("unpaired", {}))
-                    yield f"data: {json.dumps({'log': f'MSAs ready ({n_cached} sequences cached)', 'log_class': 'success'})}\n\n"
+                    n_unpaired = len(msa_result.get("unpaired", {}))
+                    has_paired = bool(msa_result.get("paired_dir"))
+                    paired_str = ", paired" if has_paired else ""
+                    yield f"data: {json.dumps({'log': f'MSAs ready ({n_unpaired} unpaired{paired_str})', 'log_class': 'success'})}\n\n"
 
             # Check cache for each method first (instant, no container spawn)
             cached_results = {}

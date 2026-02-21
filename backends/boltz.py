@@ -22,6 +22,131 @@ from .common import (
 
 
 # =============================================================================
+# MSA Format Conversion
+# =============================================================================
+
+
+def _parse_a3m_hits(content: str) -> list[str]:
+    """Parse A3M into hit sequences, skipping query. Strips lowercase insertions."""
+    seqs: list[str] = []
+    current_lines: list[str] = []
+
+    for line in content.splitlines():
+        if line.startswith("#"):
+            continue
+        if line.startswith(">"):
+            if current_lines:
+                seq = "".join(current_lines)
+                seqs.append("".join(c for c in seq if not c.islower()))
+            current_lines = []
+        else:
+            current_lines.append(line.strip())
+
+    if current_lines:
+        seq = "".join(current_lines)
+        seqs.append("".join(c for c in seq if not c.islower()))
+
+    return seqs[1:]  # skip query
+
+
+def _parse_paired_hits(content: str, num_chains: int) -> dict[int, list[str]]:
+    """Parse paired A3M into per-chain hit sequence lists, skipping query."""
+    chains: dict[int, list[str]] = {i: [] for i in range(num_chains)}
+    current_chain: int | None = None
+    current_lines: list[str] = []
+
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith(">"):
+            if current_chain is not None and current_lines:
+                seq = "".join(current_lines)
+                chains[current_chain].append("".join(c for c in seq if not c.islower()))
+            current_lines = []
+            first_field = line[1:].strip().split("\t")[0].strip()
+            try:
+                chain_id = int(first_field)
+                if 101 <= chain_id < 101 + num_chains:
+                    current_chain = chain_id - 101
+            except ValueError:
+                pass
+        else:
+            if current_chain is not None:
+                current_lines.append(line)
+
+    if current_chain is not None and current_lines:
+        seq = "".join(current_lines)
+        chains[current_chain].append("".join(c for c in seq if not c.islower()))
+
+    # Skip first entry per chain (query)
+    for idx in chains:
+        if chains[idx]:
+            chains[idx] = chains[idx][1:]
+
+    return chains
+
+
+def _a3m_to_boltz_csv(msa_result: dict, work_dir: str) -> dict[str, str]:
+    """Convert pre-fetched A3Ms to Boltz CSV format with pairing keys.
+
+    Boltz CSV format: key,sequence
+      key=0: query sequence
+      key=1,2,...: paired hits (matching key across chains = paired)
+      key=-1: unpaired hits
+
+    Returns dict mapping sequence -> CSV file path.
+    """
+    MAX_PAIRED = 8192
+    MAX_TOTAL = 16384
+
+    sequences = msa_result["sequences"]
+    unpaired = msa_result["unpaired"]
+    paired_dir = msa_result.get("paired_dir")
+
+    paired_chains: dict[int, list[str]] | None = None
+    if paired_dir:
+        pair_path = Path(paired_dir) / "pair.a3m"
+        if pair_path.exists():
+            paired_chains = _parse_paired_hits(
+                pair_path.read_text().replace("\x00", ""), len(sequences)
+            )
+
+    csv_paths: dict[str, str] = {}
+    for chain_idx, seq in enumerate(sequences):
+        rows = [f"0,{seq}"]
+
+        # Paired hits
+        n_paired = 0
+        if paired_chains and chain_idx in paired_chains:
+            for hit_idx, hit_seq in enumerate(paired_chains[chain_idx]):
+                if not hit_seq.replace("-", ""):
+                    continue
+                if n_paired >= MAX_PAIRED:
+                    break
+                n_paired += 1
+                rows.append(f"{hit_idx + 1},{hit_seq}")
+
+        # Unpaired hits
+        if seq in unpaired:
+            merged_path = Path(unpaired[seq]) / "merged.a3m"
+            if merged_path.exists():
+                for hit_seq in _parse_a3m_hits(merged_path.read_text()):
+                    if len(rows) >= MAX_TOTAL:
+                        break
+                    rows.append(f"-1,{hit_seq}")
+
+        csv_path = Path(work_dir) / f"msa_chain_{chain_idx}.csv"
+        csv_path.write_text("key,sequence\n" + "\n".join(rows) + "\n")
+        csv_paths[seq] = str(csv_path)
+
+        n_unpaired = len(rows) - 1 - n_paired
+        print(f"[boltz2] MSA CSV chain {chain_idx}: {n_paired} paired + {n_unpaired} unpaired = {len(rows)} total")
+
+    return csv_paths
+
+
+# =============================================================================
 # Image
 # =============================================================================
 
@@ -121,15 +246,11 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
     write_log_line(job_id, "boltz_logs", msg, "boltz2")
 
     with TemporaryDirectory() as in_dir, TemporaryDirectory() as out_dir:
-        # Point YAML msa: fields to cached A3M files on volume
+        # Convert pre-fetched A3Ms to Boltz CSV format with paired keys
         if msa_result and original_fasta:
-            msa_paths = {}
-            for seq in msa_result.get("sequences", []):
-                unpaired_dir = msa_result.get("unpaired", {}).get(seq)
-                if unpaired_dir:
-                    msa_paths[seq] = f"{unpaired_dir}/merged.a3m"
-            input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths=msa_paths)
-            print(f"[boltz2] Using pre-fetched A3M MSAs for {len(msa_paths)} chains")
+            csv_paths = _a3m_to_boltz_csv(msa_result, in_dir)
+            input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths=csv_paths)
+            print(f"[boltz2] Using pre-fetched MSAs (CSV with pairing) for {len(csv_paths)} chains")
         elif msa_paths:
             if input_str.strip().startswith(">"):
                 input_str = _fasta_to_boltz_yaml(input_str, msa_paths=msa_paths)
