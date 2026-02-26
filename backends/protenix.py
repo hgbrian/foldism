@@ -240,7 +240,7 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         json_path = Path(in_dir) / "input.json"
         json_path.write_text(input_str)
 
-        use_msa_str = "true" if use_msa else "false"
+        use_msa_str = "false" if msa_result else ("true" if use_msa else "false")
         cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{PROTENIX_BASE_MODEL}"'
         print(f"Running: {cmd}")
         write_log_line(job_id, log_key, f"Command: {cmd}", "protenix")
