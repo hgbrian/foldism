@@ -112,6 +112,7 @@
                 viewportShowExpand: false,
                 viewportShowSelectionMode: false,
                 viewportShowAnimation: false,
+                pixelScale: window.devicePixelRatio || 1,
             }).then(v => {
                 viewer = v;
                 loadExamples();
@@ -492,6 +493,8 @@
 
                 loadedStructures[methodName] = struct.cell.transform.ref;
                 document.getElementById('viewer-container').style.display = 'block';
+                plugin.canvas3d?.setProps({ pixelScale: window.devicePixelRatio || 1 });
+                plugin.canvas3d?.handleResize();
                 console.log(`${methodName} added to viewport`);
                 plugin.canvas3d?.requestCameraReset();
             } catch (e) { console.error(`Failed to load ${methodName}:`, e); }
