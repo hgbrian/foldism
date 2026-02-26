@@ -23,7 +23,7 @@
         .log .info { color: #4fc3f7; }
         .log .success { color: #81c784; }
         .log .error { color: #e57373; }
-        #viewer-container { width: 100%; height: 500px; background: #fff; border-radius: 4px; border: 1px solid #ddd; }
+        #viewer-container { width: 100%; height: 500px; background: #fff; border-radius: 4px; border: 1px solid #ddd; position: relative; display: none; }
         .results { margin-top: 15px; }
         .result-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #f9fafb; border-radius: 4px; margin-bottom: 8px; }
         .result-item input[type="checkbox"] { margin-right: 8px; cursor: pointer; }
@@ -94,17 +94,28 @@
         <div class="results" id="results"></div>
         <div id="viewer-container"></div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/ngl@2.0.0-dev.37/dist/ngl.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/molstar@4.7.0/build/viewer/molstar.css">
+    <script src="https://cdn.jsdelivr.net/npm/molstar@4.7.0/build/viewer/molstar.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
     <script>
-        let stage = null;
-        let loadedComponents = {};
+        let viewer = null;
+        let loadedStructures = {};
         const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B'};
 
         document.addEventListener("DOMContentLoaded", function () {
-            stage = new NGL.Stage("viewer-container", { backgroundColor: "white" });
-            window.addEventListener("resize", () => stage.handleResize(), false);
-            loadExamples();
+            molstar.Viewer.create("viewer-container", {
+                layoutIsExpanded: false,
+                layoutShowControls: false,
+                layoutShowRemoteState: false,
+                layoutShowSequence: false,
+                layoutShowLog: false,
+                viewportShowExpand: false,
+                viewportShowSelectionMode: false,
+                viewportShowAnimation: false,
+            }).then(v => {
+                viewer = v;
+                loadExamples();
+            });
         });
 
         const defaultExamples = {
@@ -452,28 +463,50 @@
             return html ? `<span class="metrics">${html}</span>` : '';
         }
 
-        async function loadStructure(url, format, methodName) {
+        async function loadStructure(dataB64, format, methodName) {
             try {
-                const ext = (format === 'pdb') ? 'pdb' : 'mmcif';
-                console.log(`Loading ${methodName} as ${ext}...`);
-                const comp = await stage.loadFile(url, { ext: ext, defaultRepresentation: false });
-                console.log(`${methodName} loaded, atoms:`, comp.structure?.atomCount || 'unknown');
-                comp.addRepresentation("cartoon", { color: methodColors[methodName] || '#888', opacity: 0.9 });
-                if (Object.keys(loadedComponents).length === 0) {
-                    comp.autoView();
-                    console.log(`${methodName}: autoView called (first structure)`);
+                const data = atob(dataB64);
+                const fmt = (format === 'pdb') ? 'pdb' : 'mmcif';
+                console.log(`Loading ${methodName} as ${fmt}...`);
+
+                await viewer.loadStructureFromData(data, fmt, { dataLabel: methodName });
+
+                const plugin = viewer.plugin;
+                const structs = plugin.managers.structure.hierarchy.current.structures;
+                const struct = structs[structs.length - 1];
+
+                const colorHex = methodColors[methodName] || '#888888';
+                const colorNum = parseInt(colorHex.replace('#', ''), 16);
+
+                for (const component of struct.components) {
+                    for (const repr of component.representations) {
+                        await plugin.state.data.build()
+                            .to(repr.cell)
+                            .update(old => ({
+                                ...old,
+                                colorTheme: { name: 'uniform', params: { value: colorNum } }
+                            }))
+                            .commit();
+                    }
                 }
-                loadedComponents[methodName] = comp;
+
+                loadedStructures[methodName] = struct.cell.transform.ref;
+                document.getElementById('viewer-container').style.display = 'block';
                 console.log(`${methodName} added to viewport`);
-                // Auto-center on all structures after each load
-                stage.autoView();
+                plugin.canvas3d?.requestCameraReset();
             } catch (e) { console.error(`Failed to load ${methodName}:`, e); }
         }
 
         function toggleStructureVisibility(methodName, visible) {
-            if (loadedComponents[methodName]) {
-                loadedComponents[methodName].setVisibility(visible);
+            const ref = loadedStructures[methodName];
+            if (!ref) return;
+            const state = viewer.plugin.state.data;
+            function setHidden(r) {
+                state.updateCellState(r, { isHidden: !visible });
+                const children = state.tree.children.get(r);
+                if (children) children.forEach(c => setHidden(c));
             }
+            setHidden(ref);
         }
 
         let downloadAllPending = null;  // Guard against concurrent calls
@@ -555,7 +588,7 @@
             submitBtn.disabled = true;
             logEl.innerHTML = '';
             resultsEl.innerHTML = '';
-            if (stage) { stage.removeAllComponents(); loadedComponents = {}; }
+            if (viewer) { await viewer.plugin.clear(); loadedStructures = {}; document.getElementById('viewer-container').style.display = 'none'; }
 
             // Estimate total time based on methods and protein size
             const seqLength = fasta.replace(/>[^\n]*\n/g, '').replace(/\s/g, '').length;
@@ -715,8 +748,7 @@
                                 const colorStr = methodColors[result.method] || '#888';
 
                                 const structureMime = resultData.ext === 'pdb' ? 'chemical/x-pdb' : 'chemical/x-cif';
-                                const structureUrl = base64ToBlob(resultData.structure, structureMime);
-                                let downloadUrl = structureUrl, downloadExt = resultData.ext;
+                                let downloadUrl = base64ToBlob(resultData.structure, structureMime), downloadExt = resultData.ext;
                                 if (resultData.original_cif) {
                                     downloadUrl = base64ToBlob(resultData.original_cif, 'chemical/x-cif');
                                     downloadExt = 'cif';
@@ -746,7 +778,7 @@
                                 resultsEl.appendChild(item);
 
                                 // Load structure asynchronously (don't block on it)
-                                loadStructure(structureUrl, result.format, result.method).catch(e =>
+                                loadStructure(resultData.structure, result.format, result.method).catch(e =>
                                     console.error(`Failed to load structure for ${result.method}:`, e)
                                 );
 
