@@ -493,7 +493,15 @@
 
                 loadedStructures[methodName] = struct.cell.transform.ref;
                 document.getElementById('viewer-container').style.display = 'block';
-                plugin.canvas3d?.setProps({ pixelScale: window.devicePixelRatio || 1 });
+                const pp = plugin.canvas3d?.props.postprocessing;
+                plugin.canvas3d?.setProps({
+                    pixelScale: window.devicePixelRatio || 1,
+                    postprocessing: {
+                        ...pp,
+                        antialiasing: { name: 'smaa', params: { edgeThreshold: 0.1, maxSearchSteps: 16 } },
+                        outline: { name: 'on', params: { scale: 1, threshold: 0.33, color: 0x000000, includeTransparent: true } },
+                    },
+                });
                 plugin.canvas3d?.handleResize();
                 console.log(`${methodName} added to viewport`);
                 plugin.canvas3d?.requestCameraReset();
