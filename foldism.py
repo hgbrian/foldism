@@ -38,7 +38,7 @@ from backends.common import job_store
 # Web Image
 # =============================================================================
 
-web_image = (
+_web_image = (
     Image.micromamba(python_version="3.12")
     .micromamba_install(["maxit==11.300"], channels=["conda-forge", "bioconda"])
     .pip_install(
@@ -51,6 +51,8 @@ web_image = (
     .add_local_python_source("backends")
     .add_local_file("index.html", "/app/index.html")
 )
+_overrides = Path(__file__).parent / "overrides.json"
+web_image = _web_image.add_local_file(str(_overrides), "/app/overrides.json") if _overrides.exists() else _web_image
 
 # =============================================================================
 # Helpers
@@ -1038,6 +1040,13 @@ def web():
     @flask_app.route("/", methods=["GET"])
     def home():
         return Path("/app/index.html").read_text()
+
+    @flask_app.route("/overrides.json", methods=["GET"])
+    def overrides():
+        p = Path("/app/overrides.json")
+        if p.exists():
+            return flask_app.response_class(p.read_text(), mimetype="application/json")
+        abort(404)
 
     @flask_app.route("/fold", methods=["POST"])
     def fold():

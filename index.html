@@ -119,11 +119,16 @@
             });
         });
 
-        const defaultExamples = {
+        let defaultExamples = {
             'Insulin': '>Insulin\nGIVEQCCTSICSLYQLENYCN\n>InsulinB\nFVNQHLCGSHLVEALYLVCGERGFFYTPKT',
             'GFP': '>GFP\nMSKGEELFTGVVPILVELDGDVNGHKFSVSGEGEGDATYGKLTLKFICTTGKLPVPWPTLVTTLTYGVQCFSRYPDHMKQHDFFKSAMPEGYVQERTIFFKDDGNYKTRAEVKFEGDTLVNRIELKGIDFKEDGNILGHKLEYNYNSHNVYIMADKQKNGIKVNFKIRHNIEDGSVQLADHYQQNTPIGDGPVLLPDNHYLSTQSALSKDPNEKRDHMVLLEFVTAAGITLGMDELYK',
             'Lysozyme': '>Lysozyme\nKVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL'
         };
+
+        // Load overrides.json if present (replaces default examples)
+        fetch('/overrides.json').then(r => r.ok ? r.json() : null).then(data => {
+            if (data && data.examples) { defaultExamples = data.examples; loadExamples(); }
+        }).catch(() => {});
 
         function getExamples() {
             try { return JSON.parse(localStorage.getItem('foldism-examples') || '{}'); }
