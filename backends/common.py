@@ -118,6 +118,7 @@ FOLDING_APPS: dict[str, FoldingApp] = {
     "chai1": FoldingApp("Chai-1", "chai1", "Chai-1 structure prediction", "chai_fasta"),
     "protenix": FoldingApp("Protenix", "protenix", "Protenix (AlphaFold3-style)", "protenix_fasta"),
     "alphafold2": FoldingApp("AlphaFold2", "alphafold2", "AlphaFold2/ColabFold", "af2_fasta"),
+    "openfold3": FoldingApp("OpenFold 3", "openfold3", "OpenFold 3 (AlphaFold3-style)", "openfold3_fasta"),
 }
 
 # =============================================================================
@@ -260,11 +261,62 @@ def _normalize_fasta(fasta_str: str) -> str:
     return "\n".join(lines)
 
 
+def _fasta_to_openfold3_json(
+    fasta_str: str,
+    name: str = "input",
+    msa_dir_map: dict[str, str] | None = None,
+    paired_dir_map: dict[str, str] | None = None,
+) -> str:
+    """Convert FASTA to OpenFold 3 query JSON format.
+
+    MSA paths point to actual a3m files in openfold3's expected layout.
+    """
+    chain_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    chains_list: list[dict[str, Any]] = []
+
+    for n, (seq_id, seq) in enumerate(fasta_iter(fasta_str)):
+        parts = seq_id.split("|")
+        first_part = parts[0].lower() if parts else ""
+
+        if first_part in ("protein", "dna", "rna", "ligand"):
+            entity_type = first_part
+        else:
+            entity_type = "protein"
+
+        cid = chain_letters[n] if n < len(chain_letters) else f"chain_{n}"
+
+        chain: dict[str, Any] = {
+            "molecule_type": entity_type,
+            "chain_ids": [cid],
+        }
+
+        if entity_type == "ligand":
+            chain["smiles"] = seq
+        else:
+            chain["sequence"] = seq
+
+        if entity_type == "protein":
+            if msa_dir_map and seq in msa_dir_map:
+                chain["main_msa_file_paths"] = msa_dir_map[seq] + "/colabfold_main.a3m"
+            if paired_dir_map and seq in paired_dir_map:
+                chain["paired_msa_file_paths"] = paired_dir_map[seq] + "/colabfold_paired.a3m"
+
+        chains_list.append(chain)
+
+    query: dict[str, Any] = {"chains": chains_list}
+    has_msas = bool(msa_dir_map)
+    if has_msas:
+        query["use_msas"] = True
+
+    return json.dumps({"queries": {name: query}}, indent=2)
+
+
 CONVERTERS = {
     "boltz_yaml": _fasta_to_boltz_yaml,
     "chai_fasta": _fasta_to_chai_fasta,
     "protenix_fasta": _normalize_fasta,
     "af2_fasta": _fasta_to_af2_fasta,
+    "openfold3_fasta": _normalize_fasta,
 }
 
 
@@ -333,6 +385,20 @@ def alphafold_cache_key(params: dict[str, Any]) -> str:
     return sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def openfold3_cache_key(params: dict[str, Any]) -> str:
+    """Generate cache key for OpenFold 3 predictions."""
+    input_hash = sha256(params.get("input_str", "").encode()).hexdigest()
+    cache_params = {
+        "version": CACHE_VERSION,
+        "input_hash": input_hash,
+        "seed": params.get("seed", 42),
+        "use_msa": params.get("use_msa", True),
+        "model": "openfold3",
+        "checkpoint": "openfold3-p2-155k",
+    }
+    return sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def get_cache_key(method: str, params: dict[str, Any]) -> str:
     """Get cache key for any method."""
     if method == "boltz2":
@@ -343,6 +409,8 @@ def get_cache_key(method: str, params: dict[str, Any]) -> str:
         return protenix_cache_key(params)
     elif method == "alphafold2":
         return alphafold_cache_key(params)
+    elif method == "openfold3":
+        return openfold3_cache_key(params)
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -357,6 +425,8 @@ def get_cache_subdir(method: str) -> str:
         return "protenix"
     elif method == "alphafold2":
         return "alphafold2"
+    elif method == "openfold3":
+        return "openfold3"
     else:
         raise ValueError(f"Unknown method: {method}")
 

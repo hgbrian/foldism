@@ -1,6 +1,6 @@
 """Multi-algorithm protein folding web interface.
 
-Uses backends for Boltz-2, Chai-1, Protenix, and AlphaFold2 predictions.
+Uses backends for Boltz-2, Chai-1, Protenix, AlphaFold2, and OpenFold 3 predictions.
 
     uv run modal run foldism.py   # run
     uv run modal deploy foldism.py   # deploy
@@ -30,6 +30,7 @@ from backends import (
     convert_for_app,
     get_cache_key,
     get_cache_subdir,
+    openfold3_predict,
     protenix_predict,
 )
 from backends.common import job_store
@@ -44,7 +45,7 @@ _web_image = (
     .pip_install(
         "flask==3.1.0",
         "polars==1.19.0",
-        "gemmi==0.7.0",
+        "gemmi==0.7.4",
         "pyyaml==6.0.2",
         "numpy==2.2.1",
     )
@@ -179,6 +180,23 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     pass
         return best_idx
 
+    elif algo == "openfold3":
+        best_idx, best_score = 1, -float("inf")
+        for path, content in outputs:
+            path_str = str(path)
+            if "_confidences_aggregated.json" in path_str:
+                try:
+                    scores = json.loads(content)
+                    score = scores.get("avg_plddt", scores.get("plddt", 0))
+                    if isinstance(score, list):
+                        score = sum(score) / len(score) if score else 0
+                    idx = int(path_str.split("_sample_")[1].split("_")[0])
+                    if score > best_score:
+                        best_score, best_idx = score, idx
+                except:
+                    pass
+        return best_idx
+
     return 0
 
 
@@ -227,6 +245,15 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
             if "ranked_0.pdb" in path_str or ("rank_001" in path_str and path_str.endswith(".pdb")):
                 result["structure.cif"] = _pdb_to_cif(content)
             elif "ranking_debug.json" in path_str:
+                result["scores.json"] = content
+
+    elif algo == "openfold3":
+        best_idx = _find_best_model_index(algo, outputs)
+        for path, content in outputs:
+            path_str = str(path)
+            if f"_sample_{best_idx}_model.cif" in path_str:
+                result["structure.cif"] = content
+            elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
                 result["scores.json"] = content
 
     return result
@@ -303,6 +330,15 @@ def _build_method_params(
         if msa_result:
             params["msa_result"] = msa_result
         return params
+    elif method == "openfold3":
+        params = {
+            "input_str": converted_input,
+            "input_name": input_name,
+            "use_msa": use_msa,
+        }
+        if msa_result:
+            params["msa_result"] = msa_result
+        return params
     else:
         raise ValueError(f"Unknown method: {method}")
 
@@ -329,6 +365,8 @@ def run_algorithm(
         outputs = protenix_predict.remote(params=params, overwrite=overwrite)
     elif algo == "alphafold2":
         outputs = alphafold_predict.remote(params=params, overwrite=overwrite)
+    elif algo == "openfold3":
+        outputs = openfold3_predict.remote(params=params, overwrite=overwrite)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
@@ -373,7 +411,7 @@ def main(
 
     # Pre-fetch MSAs for backends that support it (boltz2, protenix, chai1)
     msa_result = None
-    msa_backends = [a for a in algos_to_run if a in ("boltz2", "protenix", "chai1", "alphafold2")]
+    msa_backends = [a for a in algos_to_run if a in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3")]
     if not use_msa and msa_backends:
         print(f"Warning: --no-use-msa set; {', '.join(msa_backends)} will use their own MSA servers (slower, not cached)")
     needs_colabsearch = use_msa and bool(msa_backends)
@@ -461,8 +499,13 @@ def _superpose_structures(
             continue
 
         try:
-            doc = gemmi.cif.read_string(cif_bytes.decode())
+            cif_str = cif_bytes.decode()
+            doc = gemmi.cif.read_string(cif_str)
             st = gemmi.make_structure_from_block(doc[0])
+            if len(st) == 0:
+                print(f"[align] {key}: CIF has 0 models (block={doc[0].name}, size={len(cif_str)}, first_100={cif_str[:100]!r})")
+                result[key] = cif_bytes
+                continue
             model = st[0]
 
             target_chain = None
@@ -489,12 +532,15 @@ def _superpose_structures(
                 for chain in m:
                     for residue in chain:
                         for atom in residue:
-                            atom.pos = sup.transform.apply(atom.pos)
+                            new = sup.transform.apply(atom.pos)
+                            atom.pos = gemmi.Position(new[0], new[1], new[2])
 
             st.update_mmcif_block(doc[0])
             result[key] = doc.as_string().encode()
         except Exception as e:
-            print(f"Failed to superpose {key}: {e}")
+            import traceback
+            print(f"Failed to superpose {key}: {type(e).__name__}: {e}")
+            traceback.print_exc()
             result[key] = cif_bytes
 
     return result
@@ -554,6 +600,8 @@ def fold_structure_web(
             outputs = protenix_predict.remote(params=params, job_id=job_id)
         elif method == "alphafold2":
             outputs = alphafold_predict.remote(params=params, job_id=job_id)
+        elif method == "openfold3":
+            outputs = openfold3_predict.remote(params=params, job_id=job_id)
         else:
             return (method, None, f"Unknown method: {method}")
 
@@ -626,6 +674,15 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 if "scores" not in files:
                     files["scores"] = content
 
+    elif method == "openfold3":
+        best_idx = _find_best_model_index(method, outputs)
+        for path, content in outputs:
+            path_str = str(path)
+            if f"_sample_{best_idx}_model.cif" in path_str:
+                files["structure"] = (content, "cif")
+            elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
+                files["scores"] = content
+
     if "structure" not in files:
         return None
 
@@ -666,7 +723,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
 
     # Pre-fetch MSAs for backends that support it
     msa_result = None
-    needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2"))
+    needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3"))
     if needs_colabsearch:
         protein_seqs = _extract_protein_sequences(fasta)
         if protein_seqs:
@@ -756,6 +813,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
 
             # Build and send result immediately
             original_cif_bytes = structure_bytes if fmt == "cif" else None
+            print(f"[result] {method}: structure={len(structure_bytes)} bytes, fmt={fmt}")
             display_bytes = structure_bytes
             display_fmt = fmt
             if fmt == "cif":
@@ -920,6 +978,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                 ("chai1", "chai1_logs", "Chai-1"),
                 ("protenix", "protenix_logs", "Protenix"),
                 ("alphafold2", "alphafold2_logs", "AlphaFold2"),
+                ("openfold3", "openfold3_logs", "OpenFold3"),
             ]
 
             for method_key, log_key, display_name in log_configs:
@@ -1108,7 +1167,7 @@ def web():
 
             # Pre-fetch MSAs for backends that support it
             msa_result = None
-            needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2"))
+            needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3"))
             if needs_colabsearch:
                 protein_seqs = _extract_protein_sequences(fasta)
                 if protein_seqs:
