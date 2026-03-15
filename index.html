@@ -66,8 +66,9 @@
             <div class="methods">
                 <label><input type="checkbox" name="method" value="chai1" checked> Chai-1</label>
                 <label><input type="checkbox" name="method" value="boltz2"> Boltz-2</label>
-                <label><input type="checkbox" name="method" value="protenix"> Protenix</label>
+                <label><input type="checkbox" name="method" value="protenix"> Protenix 1</label>
                 <label><input type="checkbox" name="method" value="alphafold2"> AlphaFold 2</label>
+                <label><input type="checkbox" name="method" value="openfold3"> OpenFold 3</label>
             </div>
             <div style="margin: 8px 0; font-size: 13px; color: #666;">
                 <label style="cursor:pointer;"><input type="checkbox" id="use-msa" checked style="margin-right: 4px;">Use MSA</label>
@@ -100,7 +101,7 @@
     <script>
         let viewer = null;
         let loadedStructures = {};
-        const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B'};
+        const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B', 'OpenFold 3': '#8B5CF6'};
 
         document.addEventListener("DOMContentLoaded", function () {
             molstar.Viewer.create("viewer-container", {
@@ -203,8 +204,9 @@
         const methodConfigs = {
             'boltz2': { name: 'Boltz-2', prefix: '[Boltz]' },
             'chai1': { name: 'Chai-1', prefix: '[Chai-1]' },
-            'protenix': { name: 'Protenix', prefix: '[Protenix]' },
-            'alphafold2': { name: 'AlphaFold2', prefix: '[AlphaFold2]' }
+            'protenix': { name: 'Protenix 1', prefix: '[Protenix]' },
+            'alphafold2': { name: 'AlphaFold2', prefix: '[AlphaFold2]' },
+            'openfold3': { name: 'OpenFold 3', prefix: '[OpenFold3]' }
         };
 
         function createLogSection(methodKey) {
@@ -256,8 +258,9 @@
             const detailedLogPrefixes = {
                 '[Boltz]': { key: 'boltz2', name: 'Boltz-2' },
                 '[Chai-1]': { key: 'chai1', name: 'Chai-1' },
-                '[Protenix]': { key: 'protenix', name: 'Protenix' },
-                '[AlphaFold2]': { key: 'alphafold2', name: 'AlphaFold2' }
+                '[Protenix]': { key: 'protenix', name: 'Protenix 1' },
+                '[AlphaFold2]': { key: 'alphafold2', name: 'AlphaFold2' },
+                '[OpenFold3]': { key: 'openfold3', name: 'OpenFold 3' }
             };
 
             for (const [prefix, config] of Object.entries(detailedLogPrefixes)) {
@@ -420,6 +423,17 @@
                 } else if (scores.iptm !== undefined) {
                     metrics.iptm = scores.iptm;
                 }
+            } else if (method === 'OpenFold 3') {
+                if (scores.avg_plddt !== undefined) metrics.plddt = scores.avg_plddt;
+                if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
+                if (scores.iptm !== undefined) metrics.iptm = scores.iptm;
+                if (scores.sample_ranking_score !== undefined) metrics.ranking = scores.sample_ranking_score;
+                if (scores.chain_pair_iptm && typeof scores.chain_pair_iptm === 'object') {
+                    const entries = Object.entries(scores.chain_pair_iptm);
+                    if (entries.length > 0) {
+                        metrics.iptm = entries.map(([, v]) => v);
+                    }
+                }
             } else if (method === 'AlphaFold2') {
                 // ranking_debug.json format: {plddts: {model_1: 85.2}, order: [...]}
                 if (scores.plddts) {
@@ -469,17 +483,25 @@
             return html ? `<span class="metrics">${html}</span>` : '';
         }
 
+        let _loadQueue = Promise.resolve();
         async function loadStructure(dataB64, format, methodName) {
+            _loadQueue = _loadQueue.then(() => _loadStructureImpl(dataB64, format, methodName));
+            return _loadQueue;
+        }
+        async function _loadStructureImpl(dataB64, format, methodName) {
             try {
                 const data = atob(dataB64);
                 const fmt = (format === 'pdb') ? 'pdb' : 'mmcif';
                 console.log(`Loading ${methodName} as ${fmt}...`);
 
+                const structCountBefore = viewer.plugin.managers.structure.hierarchy.current.structures.length;
                 await viewer.loadStructureFromData(data, fmt, { dataLabel: methodName });
 
                 const plugin = viewer.plugin;
                 const structs = plugin.managers.structure.hierarchy.current.structures;
-                const struct = structs[structs.length - 1];
+                const struct = structs.length > structCountBefore
+                    ? structs[structs.length - 1]
+                    : structs.find(s => s.cell?.obj?.label === methodName) || structs[structs.length - 1];
 
                 const colorHex = methodColors[methodName] || '#888888';
                 const colorNum = parseInt(colorHex.replace('#', ''), 16);
