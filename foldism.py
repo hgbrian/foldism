@@ -480,11 +480,13 @@ def _superpose_structures(
     ref_model = ref_st[0]
 
     ref_chain = None
+    max_len = 0
     for chain in ref_model:
         polymer = chain.get_polymer()
         if polymer and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL:
-            ref_chain = chain
-            break
+            if len(polymer) > max_len:
+                max_len = len(polymer)
+                ref_chain = chain
 
     if not ref_chain:
         return structures
@@ -509,14 +511,16 @@ def _superpose_structures(
             model = st[0]
 
             target_chain = None
+            max_len = 0
             for chain in model:
                 polymer = chain.get_polymer()
                 if (
                     polymer
                     and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL
                 ):
-                    target_chain = chain
-                    break
+                    if len(polymer) > max_len:
+                        max_len = len(polymer)
+                        target_chain = chain
 
             if not target_chain:
                 result[key] = cif_bytes
