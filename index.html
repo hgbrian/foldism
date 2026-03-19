@@ -103,6 +103,23 @@
         let loadedStructures = {};
         const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B', 'OpenFold 3': '#8B5CF6'};
 
+        function hexToLCHHue(hex) {
+            let r = parseInt(hex.slice(1,3), 16) / 255;
+            let g = parseInt(hex.slice(3,5), 16) / 255;
+            let b = parseInt(hex.slice(5,7), 16) / 255;
+            r = r > 0.04045 ? Math.pow((r + 0.055) / 1.055, 2.4) : r / 12.92;
+            g = g > 0.04045 ? Math.pow((g + 0.055) / 1.055, 2.4) : g / 12.92;
+            b = b > 0.04045 ? Math.pow((b + 0.055) / 1.055, 2.4) : b / 12.92;
+            const x = (r * 0.4124564 + g * 0.3575761 + b * 0.1804375) / 0.95047;
+            const y = (r * 0.2126729 + g * 0.7151522 + b * 0.0721750);
+            const z = (r * 0.0193339 + g * 0.1191920 + b * 0.9503041) / 1.08883;
+            const f = t => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16/116;
+            const a = 500 * (f(x) - f(y));
+            const bLab = 200 * (f(y) - f(z));
+            const hue = Math.atan2(bLab, a) * 180 / Math.PI;
+            return hue < 0 ? hue + 360 : hue;
+        }
+
         document.addEventListener("DOMContentLoaded", function () {
             molstar.Viewer.create("viewer-container", {
                 layoutIsExpanded: false,
@@ -504,7 +521,21 @@
                     : structs.find(s => s.cell?.obj?.label === methodName) || structs[structs.length - 1];
 
                 const colorHex = methodColors[methodName] || '#888888';
-                const colorNum = parseInt(colorHex.replace('#', ''), 16);
+                const hue = hexToLCHHue(colorHex);
+                const colorTheme = {
+                    name: 'chain-id',
+                    params: {
+                        palette: {
+                            name: 'generate',
+                            params: {
+                                maxCount: 20,
+                                hue: [Math.max(0, hue - 12), Math.min(360, hue + 12)],
+                                chroma: [30, 80],
+                                luminance: [35, 75],
+                            }
+                        }
+                    }
+                };
 
                 for (const component of struct.components) {
                     for (const repr of component.representations) {
@@ -512,7 +543,7 @@
                             .to(repr.cell)
                             .update(old => ({
                                 ...old,
-                                colorTheme: { name: 'uniform', params: { value: colorNum } }
+                                colorTheme,
                             }))
                             .commit();
                     }
