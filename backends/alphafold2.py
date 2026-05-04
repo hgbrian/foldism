@@ -82,7 +82,6 @@ def _read_a3m(path: Path) -> str:
 def _build_af2_queries(
     msa_result: dict,
     jobname: str,
-    msa_paths: dict[str, str] | None = None,
 ) -> tuple[list, bool]:
     """Build ColabFold queries list from pre-fetched MSAs.
 
@@ -102,10 +101,6 @@ def _build_af2_queries(
     # and pad_sequences() — strip them so only > headers and sequences remain.
     unpaired_msa: list[str] = []
     for seq in sequences:
-        if msa_paths and seq in msa_paths:
-            unpaired_msa.append(_read_a3m(Path(msa_paths[seq])))
-            continue
-
         parts: list[str] = []
         if seq in unpaired:
             uniref_path = Path(unpaired[seq]) / "uniref.a3m"

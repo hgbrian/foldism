@@ -196,7 +196,6 @@ PROTENIX_ENTITY_MAP = {"protein": "proteinChain", "dna": "dnaSequence", "rna": "
 def _fasta_to_protenix_json(
     input_faa: str,
     name: str = "input",
-    msa_paths: dict[str, str] | None = None,
     msa_result: dict | None = None,
 ) -> str:
     sequences = []
@@ -224,8 +223,6 @@ def _fasta_to_protenix_json(
                         chain_dict["pairedMsaPath"] = msa_result["paired_per_chain"][seq]
                     elif msa_result.get("paired_dir"):
                         chain_dict["pairedMsaPath"] = f"{msa_result['paired_dir']}/pair.a3m"
-                elif msa_paths and seq in msa_paths:
-                    chain_dict["unpairedMsaPath"] = msa_paths[seq]
             entity = {protenix_type: chain_dict}
         sequences.append(entity)
 

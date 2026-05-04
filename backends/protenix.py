@@ -192,7 +192,6 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     input_name = params.get("input_name", "input")
     seeds = params.get("seeds", "42")
     use_msa = params.get("use_msa", True)
-    msa_paths = params.get("msa_paths")
     msa_result = params.get("msa_result")
 
     log_key = "protenix_logs"
@@ -235,7 +234,7 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
                 print(f"[protenix] Split paired A3M into {len(paired_per_chain)} per-chain files")
 
         if input_str.strip().startswith(">"):
-            input_str = _fasta_to_protenix_json(input_str, input_name, msa_paths=msa_paths, msa_result=msa_result)
+            input_str = _fasta_to_protenix_json(input_str, input_name, msa_result=msa_result)
 
         json_path = Path(in_dir) / "input.json"
         json_path.write_text(input_str)

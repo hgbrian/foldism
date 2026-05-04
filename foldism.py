@@ -285,7 +285,6 @@ def _fetch_msas(protein_seqs: list[str]) -> dict:
 
 def _build_method_params(
     method: str, converted_input: str, use_msa: bool, input_name: str | None = None,
-    msa_paths: dict[str, str] | None = None,
     msa_result: dict | None = None, original_fasta: str | None = None,
 ) -> dict[str, Any]:
     """Build params dict for a method (centralized to avoid duplication)."""
@@ -302,8 +301,6 @@ def _build_method_params(
             params["msa_result"] = msa_result
             if original_fasta:
                 params["original_fasta"] = original_fasta
-        elif msa_paths:
-            params["msa_paths"] = msa_paths
         return params
     elif method == "chai1":
         params = {
@@ -322,8 +319,6 @@ def _build_method_params(
         }
         if msa_result:
             params["msa_result"] = msa_result
-        elif msa_paths:
-            params["msa_paths"] = msa_paths
         return params
     elif method == "alphafold2":
         params: dict[str, Any] = {"input_str": converted_input, "input_name": f"{input_name}.fasta"}
@@ -346,7 +341,6 @@ def _build_method_params(
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def run_algorithm(
     algo: str, fasta_str: str, run_name: str, use_msa: bool = True,
-    msa_paths: dict[str, str] | None = None,
     msa_result: dict | None = None,
     overwrite: bool = False,
 ) -> tuple[dict[str, bytes], list[tuple]]:
@@ -355,7 +349,7 @@ def run_algorithm(
     Runs on Modal with web_image so numpy/pyyaml are available.
     """
     converted = convert_for_app(fasta_str, algo)
-    params = _build_method_params(algo, converted, use_msa, run_name, msa_paths=msa_paths, msa_result=msa_result, original_fasta=fasta_str)
+    params = _build_method_params(algo, converted, use_msa, run_name, msa_result=msa_result, original_fasta=fasta_str)
 
     if algo == "boltz2":
         outputs = boltz2_predict.remote(params=params, overwrite=overwrite)
@@ -583,13 +577,12 @@ def _check_cache(method: str, fasta_str: str, use_msa: bool) -> list | None:
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
 def fold_structure_web(
     fasta_str: str, method: str, use_msa: bool = True, job_id: str | None = None,
-    msa_paths: dict[str, str] | None = None,
     msa_result: dict | None = None,
 ) -> tuple[str, dict | None, str | None]:
     """Run a single folding method for web interface."""
     try:
         converted = convert_for_app(fasta_str, method)
-        params = _build_method_params(method, converted, use_msa, msa_paths=msa_paths, msa_result=msa_result, original_fasta=fasta_str)
+        params = _build_method_params(method, converted, use_msa, msa_result=msa_result, original_fasta=fasta_str)
 
         # Check cache first - avoids spawning GPU container if cached
         cached = _check_cache_inline(method, params)
