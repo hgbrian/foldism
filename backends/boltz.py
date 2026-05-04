@@ -225,7 +225,6 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
 
     input_str = params["input_str"]
     use_msa = params.get("use_msa", True)
-    msa_paths = params.get("msa_paths")
     msa_result = params.get("msa_result")
     original_fasta = params.get("original_fasta")
     params_str = params.get("params_str", BOLTZ_BASE_PARAMS)
@@ -251,10 +250,6 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
             csv_paths = _a3m_to_boltz_csv(msa_result, in_dir)
             input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths=csv_paths)
             print(f"[boltz2] Using pre-fetched MSAs (CSV with pairing) for {len(csv_paths)} chains")
-        elif msa_paths:
-            if input_str.strip().startswith(">"):
-                input_str = _fasta_to_boltz_yaml(input_str, msa_paths=msa_paths)
-            # Don't add --use_msa_server since MSAs are pre-computed
         else:
             if input_str.strip().startswith(">"):
                 input_str = _fasta_to_boltz_yaml(input_str)
