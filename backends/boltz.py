@@ -87,39 +87,40 @@ def _parse_paired_hits(content: str, num_chains: int) -> dict[int, list[str]]:
     return chains
 
 
-def _a3m_to_boltz_csv(msa_result: dict, work_dir: str) -> dict[str, str]:
+def _a3m_to_boltz_csv(msa_result: dict, chain_sequences: list[str], work_dir: str) -> list[str]:
     """Convert pre-fetched A3Ms to Boltz CSV format with pairing keys.
+
+    `chain_sequences` is the ordered chain list from THIS input's FASTA
+    (duplicates preserved). Returns ONE CSV path per chain in the same order,
+    so a homodimer of [A, A] gets two distinct CSVs with chain-specific
+    paired hits (chain 0's paired with chain 1, and vice versa).
 
     Boltz CSV format: key,sequence
       key=0: query sequence
       key=1,2,...: paired hits (matching key across chains = paired)
       key=-1: unpaired hits
-
-    Returns dict mapping sequence -> CSV file path.
     """
     MAX_PAIRED = 8192
     MAX_TOTAL = 16384
 
-    sequences = msa_result["sequences"]
     unpaired = msa_result["unpaired"]
     paired_dir = msa_result.get("paired_dir")
 
-    paired_chains: dict[int, list[str]] | None = None
+    paired_per_chain: dict[int, list[str]] | None = None
     if paired_dir:
         pair_path = Path(paired_dir) / "pair.a3m"
         if pair_path.exists():
-            paired_chains = _parse_paired_hits(
-                pair_path.read_text().replace("\x00", ""), len(sequences)
+            paired_per_chain = _parse_paired_hits(
+                pair_path.read_text().replace("\x00", ""), len(chain_sequences)
             )
 
-    csv_paths: dict[str, str] = {}
-    for chain_idx, seq in enumerate(sequences):
+    csv_paths: list[str] = []
+    for chain_idx, seq in enumerate(chain_sequences):
         rows = [f"0,{seq}"]
 
-        # Paired hits
         n_paired = 0
-        if paired_chains and chain_idx in paired_chains:
-            for hit_idx, hit_seq in enumerate(paired_chains[chain_idx]):
+        if paired_per_chain and chain_idx in paired_per_chain:
+            for hit_idx, hit_seq in enumerate(paired_per_chain[chain_idx]):
                 if not hit_seq.replace("-", ""):
                     continue
                 if n_paired >= MAX_PAIRED:
@@ -127,7 +128,7 @@ def _a3m_to_boltz_csv(msa_result: dict, work_dir: str) -> dict[str, str]:
                 n_paired += 1
                 rows.append(f"{hit_idx + 1},{hit_seq}")
 
-        # Unpaired hits
+        # Unpaired hits — identical sequences share the same unpaired MSA.
         if seq in unpaired:
             merged_path = Path(unpaired[seq]) / "merged.a3m"
             if merged_path.exists():
@@ -138,7 +139,7 @@ def _a3m_to_boltz_csv(msa_result: dict, work_dir: str) -> dict[str, str]:
 
         csv_path = Path(work_dir) / f"msa_chain_{chain_idx}.csv"
         csv_path.write_text("key,sequence\n" + "\n".join(rows) + "\n")
-        csv_paths[seq] = str(csv_path)
+        csv_paths.append(str(csv_path))
 
         n_unpaired = len(rows) - 1 - n_paired
         print(f"[boltz2] MSA CSV chain {chain_idx}: {n_paired} paired + {n_unpaired} unpaired = {len(rows)} total")
@@ -151,39 +152,51 @@ def _a3m_to_boltz_csv(msa_result: dict, work_dir: str) -> dict[str, str]:
 # =============================================================================
 
 
+BOLTZ_VOLUME_DIR = "/models/boltz2"
+BOLTZ_MARKER = Path(BOLTZ_VOLUME_DIR) / "_DOWNLOADED"
+BOLTZ_PKG = "boltz==2.2.0"
+
+
 def _download_boltz_models():
     """Download Boltz models and CCD mols directory to volume during image build."""
     from boltz.main import download_boltz1, download_boltz2
-    from huggingface_hub import snapshot_download
 
-    if not Path("/models/boltz1_conf.ckpt").exists():
+    boltz_dir = Path(BOLTZ_VOLUME_DIR)
+    boltz_dir.mkdir(parents=True, exist_ok=True)
+
+    if BOLTZ_MARKER.exists():
+        print("[boltz] Already on volume (marker present); skipping download")
+        return
+
+    if not (boltz_dir / "boltz1_conf.ckpt").exists():
         print("[boltz] Downloading boltz1 model...")
-        download_boltz1(Path("/models"))
+        download_boltz1(boltz_dir)
         print("[boltz] boltz1 model downloaded")
 
-    if not Path("/models/boltz2_conf.ckpt").exists():
+    if not (boltz_dir / "boltz2_conf.ckpt").exists():
         print("[boltz] Downloading boltz2 model...")
-        download_boltz2(Path("/models"))
+        download_boltz2(boltz_dir)
         print("[boltz] boltz2 model downloaded")
 
-    # Download CCD mols directory - required for Boltz to recognize chemical components
     import tarfile
-    mols_dir = Path("/models/mols")
+    mols_dir = boltz_dir / "mols"
     if not mols_dir.exists() or not any(mols_dir.glob("*.cif")):
         print("[boltz] Downloading CCD mols.tar from HuggingFace...")
-        # Download the mols.tar file from HuggingFace
         from huggingface_hub import hf_hub_download
         tar_path = hf_hub_download(
             repo_id="boltz-community/boltz-2",
             filename="mols.tar",
             cache_dir="/tmp",
         )
-        print(f"[boltz] Extracting mols.tar to /models/mols...")
+        print(f"[boltz] Extracting mols.tar to {mols_dir}...")
         mols_dir.mkdir(parents=True, exist_ok=True)
         with tarfile.open(tar_path, "r") as tar:
-            tar.extractall(path="/models")
+            tar.extractall(path=str(boltz_dir))
         cif_count = len(list(mols_dir.glob("*.cif")))
         print(f"[boltz] CCD mols directory extracted ({cif_count} CIF files)")
+
+    BOLTZ_MARKER.touch()
+    MODEL_VOLUME.commit()
 
 
 boltz_image = (
@@ -199,7 +212,7 @@ boltz_image = (
     )
     .run_commands("python -m colabfold.download")
     .apt_install("build-essential")
-    .pip_install("polars==1.19.0", "boltz==2.2.0", "huggingface_hub")
+    .pip_install("polars==1.19.0", BOLTZ_PKG, "huggingface_hub")
     .run_function(_download_boltz_models, gpu="a10g", volumes={"/models": MODEL_VOLUME})
 )
 
@@ -221,13 +234,23 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
     from tempfile import TemporaryDirectory
 
     # Set BOLTZ_CACHE to ensure all data (including CCD) is stored on volume
-    os.environ["BOLTZ_CACHE"] = "/models"
+    os.environ["BOLTZ_CACHE"] = BOLTZ_VOLUME_DIR
 
     input_str = params["input_str"]
     use_msa = params.get("use_msa", True)
     msa_result = params.get("msa_result")
     original_fasta = params.get("original_fasta")
     params_str = params.get("params_str", BOLTZ_BASE_PARAMS)
+
+    # Cache identity assumes use_msa=True ⇔ ColabSearch MSA. Refuse use_msa=True
+    # without msa_result so a direct caller can't poison the cache with boltz's
+    # built-in MSA server output under the same key.
+    if use_msa and not msa_result:
+        raise RuntimeError(
+            "[boltz2] use_msa=True but no msa_result was provided. "
+            "Pre-fetch via colabsearch (foldism main/web orchestrator does this) "
+            "or pass use_msa=False to fall back to boltz's built-in MSA server."
+        )
 
     cache_key = boltz_cache_key(params)
     cache_path = Path(f"/cache/boltz2/{cache_key}")
@@ -245,10 +268,13 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
     write_log_line(job_id, "boltz_logs", msg, "boltz2")
 
     with TemporaryDirectory() as in_dir, TemporaryDirectory() as out_dir:
-        # Convert pre-fetched A3Ms to Boltz CSV format with paired keys
+        # Convert pre-fetched A3Ms to Boltz CSV format with paired keys.
+        # One CSV per chain (homomers preserved), passed to YAML by chain position.
         if msa_result and original_fasta:
-            csv_paths = _a3m_to_boltz_csv(msa_result, in_dir)
-            input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths=csv_paths)
+            from .common import extract_chain_sequences
+            chain_sequences = extract_chain_sequences(original_fasta)
+            csv_paths = _a3m_to_boltz_csv(msa_result, chain_sequences, in_dir)
+            input_str = _fasta_to_boltz_yaml(original_fasta, msa_paths_per_chain=csv_paths)
             print(f"[boltz2] Using pre-fetched MSAs (CSV with pairing) for {len(csv_paths)} chains")
         else:
             if input_str.strip().startswith(">"):
@@ -258,7 +284,7 @@ def boltz2_predict(params: dict[str, Any], overwrite: bool = False, job_id: str 
         input_path = Path(in_dir) / "input.yaml"
         input_path.write_text(input_str)
 
-        cmd = f'stdbuf -oL boltz predict {input_path} --out_dir {out_dir} --cache /models {params_str}'
+        cmd = f'stdbuf -oL boltz predict {input_path} --out_dir {out_dir} --cache {BOLTZ_VOLUME_DIR} {params_str}'
         print(f"Running: {cmd}")
         write_log_line(job_id, "boltz_logs", f"Command: {cmd}", "boltz2")
 

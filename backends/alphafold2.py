@@ -12,6 +12,7 @@ from .common import (
     CACHE_VOLUME,
     GPU,
     LoggingOutput,
+    MODEL_VOLUME,
     TIMEOUT,
     alphafold_cache_key,
     app,
@@ -82,8 +83,13 @@ def _read_a3m(path: Path) -> str:
 def _build_af2_queries(
     msa_result: dict,
     jobname: str,
+    chain_sequences: list[str],
 ) -> tuple[list, bool]:
     """Build ColabFold queries list from pre-fetched MSAs.
+
+    `chain_sequences` is the ordered list of protein chains in THIS input
+    (homomer duplicates preserved). MSAs are looked up by sequence in
+    `msa_result["unpaired"]` (which keys by unique sequence).
 
     Bypasses get_queries() to avoid parse_fasta() issues with serialized A3M.
     For monomers: raw A3M content (no header needed — unserialize_msa fallback).
@@ -91,16 +97,12 @@ def _build_af2_queries(
 
     Returns (queries, is_complex).
     """
-    sequences = msa_result["sequences"]
     unpaired = msa_result["unpaired"]
     paired_dir = msa_result.get("paired_dir")
-    is_complex = len(sequences) > 1
+    is_complex = len(chain_sequences) > 1
 
-    # Build per-chain unpaired MSA (raw A3M strings, # comments stripped)
-    # Raw A3M from ColabFold API has # comment lines that confuse unserialize_msa()
-    # and pad_sequences() — strip them so only > headers and sequences remain.
     unpaired_msa: list[str] = []
-    for seq in sequences:
+    for seq in chain_sequences:
         parts: list[str] = []
         if seq in unpaired:
             uniref_path = Path(unpaired[seq]) / "uniref.a3m"
@@ -119,25 +121,26 @@ def _build_af2_queries(
     if is_complex:
         from colabfold.input import msa_to_str
 
-        # Build per-chain paired MSA, None if no paired data
         paired_msa: list[str] | None = None
         if paired_dir:
             pair_a3m_path = Path(paired_dir) / "pair.a3m"
             if pair_a3m_path.exists():
                 content = pair_a3m_path.read_text().replace("\x00", "")
-                blocks = _parse_a3m_blocks(content, len(sequences))
+                # ColabSearch built pair.a3m with one section per chain in the
+                # full (duplicate-preserving) sequence list it was sent. Split
+                # by the same chain count so homomers get all sections.
+                blocks = _parse_a3m_blocks(content, len(chain_sequences))
                 if any(blocks.values()):
-                    paired_msa = [blocks.get(i, "") for i in range(len(sequences))]
+                    paired_msa = [blocks.get(i, "") for i in range(len(chain_sequences))]
 
-        a3m_str = msa_to_str(unpaired_msa, paired_msa, sequences, [1] * len(sequences))
-        query_sequence = ":".join(sequences)
+        a3m_str = msa_to_str(unpaired_msa, paired_msa, chain_sequences, [1] * len(chain_sequences))
+        query_sequence = ":".join(chain_sequences)
     else:
-        # Monomer: raw A3M content works directly (unserialize_msa simple fallback)
         a3m_str = unpaired_msa[0]
-        query_sequence = sequences[0]
+        query_sequence = chain_sequences[0]
 
     n_seqs = sum(1 for line in a3m_str.splitlines() if line.startswith(">"))
-    print(f"[alphafold2] Pre-fetched MSA: {n_seqs} entries, {is_complex=}")
+    print(f"[alphafold2] Pre-fetched MSA: {n_seqs} entries, {is_complex=}, chains={len(chain_sequences)}")
 
     queries = [(jobname, query_sequence, [a3m_str], None)]
     return queries, is_complex
@@ -147,18 +150,43 @@ def _build_af2_queries(
 # Image
 # =============================================================================
 
+ALPHAFOLD2_VOLUME_DIR = "/models/alphafold2"
+ALPHAFOLD2_MARKER = Path(ALPHAFOLD2_VOLUME_DIR) / "_DOWNLOADED"
+COLABFOLD_GIT_REF = "a134f6a8f8de5c41c63cb874d07e1a334cb021bb"
+
+
+def _download_alphafold2_models():
+    """Download ColabFold/AF2 params to the model volume during image build."""
+    from colabfold.download import download_alphafold_params
+
+    cache_dir = Path(ALPHAFOLD2_VOLUME_DIR)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if ALPHAFOLD2_MARKER.exists():
+        print("[alphafold2] Already on volume (marker present); skipping download")
+        return
+
+    for model_type in ("alphafold2_ptm", "alphafold2_multimer_v3"):
+        print(f"[alphafold2] Downloading {model_type}...")
+        download_alphafold_params(model_type, data_dir=cache_dir)
+
+    ALPHAFOLD2_MARKER.touch()
+    MODEL_VOLUME.commit()
+    print("[alphafold2] Params downloaded")
+
+
 alphafold_image = (
     Image.micromamba(python_version="3.11")
     .apt_install("wget", "git")
     .pip_install(
-        "colabfold[alphafold-minus-jax]@git+https://github.com/sokrypton/ColabFold@a134f6a8f8de5c41c63cb874d07e1a334cb021bb"
+        f"colabfold[alphafold-minus-jax]@git+https://github.com/sokrypton/ColabFold@{COLABFOLD_GIT_REF}"
     )
     .micromamba_install("kalign2=2.04", "hhsuite=3.3.0", "pdbfixer=1.9", channels=["conda-forge", "bioconda"])
     .run_commands(
         'pip install --upgrade "jax[cuda12_pip]==0.5.3" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html',
         gpu="a10g",
     )
-    .run_commands("python -m colabfold.download")
+    .run_function(_download_alphafold2_models, volumes={"/models": MODEL_VOLUME}, timeout=3600)
 )
 
 # =============================================================================
@@ -170,7 +198,7 @@ alphafold_image = (
     image=alphafold_image,
     timeout=TIMEOUT * 60,
     gpu="a100-80gb",  # A100-80GB for better JAX compatibility and more VRAM
-    volumes={"/cache": CACHE_VOLUME},
+    volumes={"/models": MODEL_VOLUME, "/cache": CACHE_VOLUME},
 )
 def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: str | None = None) -> list:
     """Run AlphaFold2/ColabFold structure prediction."""
@@ -179,7 +207,14 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
     from io import BytesIO
     from tempfile import TemporaryDirectory
     from colabfold.batch import get_queries, run as colabfold_run
-    from colabfold.download import default_data_dir
+
+    MODEL_VOLUME.reload()
+    af2_data_dir = Path(ALPHAFOLD2_VOLUME_DIR)
+    if not ALPHAFOLD2_MARKER.exists():
+        raise RuntimeError(
+            f"AF2 params not on volume at {af2_data_dir}. "
+            "Rebuild with: uv run modal run --force-build foldism.py"
+        )
 
     os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.9"  # Limit JAX memory to 90%
@@ -197,6 +232,17 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
         models = params.get("models", [1])
         num_recycles = params.get("num_recycles", 3)
         msa_result = params.get("msa_result")
+        use_msa = params.get("use_msa", True)
+
+        # Cache identity assumes use_msa=True ⇔ pre-fetched ColabSearch MSA.
+        # Refuse use_msa=True without msa_result to prevent a direct caller from
+        # poisoning the cache with colabfold's mmseqs2_uniref_env server output.
+        if use_msa and not msa_result:
+            raise RuntimeError(
+                "[alphafold2] use_msa=True but no msa_result provided. "
+                "Pre-fetch via colabsearch (foldism orchestrator does this) "
+                "or pass use_msa=False to run msa_mode=single_sequence."
+            )
 
         cache_key = alphafold_cache_key(params)
         cache_path = Path(f"/cache/alphafold2/{cache_key}")
@@ -215,13 +261,26 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
             jobname = Path(input_name).stem
 
             if msa_result:
-                queries, is_complex = _build_af2_queries(msa_result, jobname)
+                # Parse the ORIGINAL multi-record FASTA (not the AF2-converted
+                # form, which joins chains with ':' on a single line and would
+                # be treated as one non-protein sequence by extract_chain_sequences).
+                from backends.common import extract_chain_sequences
+                original_fasta = params.get("original_fasta") or input_str
+                chain_sequences = extract_chain_sequences(original_fasta)
+                if not chain_sequences:
+                    raise RuntimeError("[alphafold2] No protein chains found in input")
+                queries, is_complex = _build_af2_queries(msa_result, jobname, chain_sequences)
             else:
                 fasta_path = Path(in_dir) / input_name
                 fasta_path.write_text(input_str)
                 queries, is_complex = get_queries(in_dir)
 
             print(f"Running AF2 on {len(queries)} queries, {is_complex=}")
+
+            # Explicit MSA mode: single_sequence when use_msa=False, else default
+            # (colabfold's mmseqs2 path will be skipped since we supply queries).
+            msa_mode = "single_sequence" if not use_msa else "mmseqs2_uniref_env"
+            print(f"[alphafold2] msa_mode={msa_mode}, msa_result={'yes' if msa_result else 'no'}")
 
             colabfold_run(
                 queries=queries,
@@ -233,7 +292,8 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
                 num_relax=0,
                 model_type="auto",
                 is_complex=is_complex,
-                data_dir=default_data_dir,
+                data_dir=af2_data_dir,
+                msa_mode=msa_mode,
                 zip_results=False,
             )
 

@@ -68,12 +68,19 @@ def _split_paired_a3m(content: str, num_chains: int) -> list[str]:
 # =============================================================================
 
 
+OPENFOLD3_MARKER = Path("/models/openfold3/_DOWNLOADED")
+
+
 def _download_openfold3_models():
     """Download OpenFold3 checkpoint and CCD to volume."""
     import subprocess
 
     cache_dir = Path("/models/openfold3")
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if OPENFOLD3_MARKER.exists():
+        print("[openfold3] Already on volume (marker present); skipping download")
+        return
 
     ckpt = cache_dir / f"{OPENFOLD3_CHECKPOINT}.pt"
     if not ckpt.exists():
@@ -96,6 +103,9 @@ def _download_openfold3_models():
             str(ccd),
         ], check=True)
         print(f"[openfold3] CCD downloaded ({ccd.stat().st_size:,} bytes)")
+
+    OPENFOLD3_MARKER.touch()
+    MODEL_VOLUME.commit()
 
 
 openfold3_image = (
@@ -131,6 +141,12 @@ def openfold3_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
     use_msa = params.get("use_msa", True)
     msa_result = params.get("msa_result")
 
+    if use_msa and not msa_result:
+        raise RuntimeError(
+            "[openfold3] use_msa=True but no msa_result provided. "
+            "Pre-fetch via colabsearch or pass use_msa=False to disable MSA."
+        )
+
     log_key = "openfold3_logs"
 
     MODEL_VOLUME.reload()
@@ -162,57 +178,59 @@ def openfold3_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
         # Prepare MSA files in openfold3's expected format:
         #   main/<rep_id>/colabfold_main.a3m  (per-chain)
         #   paired/<complex_id>/<rep_id>/colabfold_paired.a3m  (per-chain)
-        msa_dir_map: dict[str, str] = {}  # seq -> main msa dir
-        paired_dir_map: dict[str, str] = {}  # seq -> paired msa dir
+        msa_dir_map: dict[str, str] = {}  # seq -> main msa dir (unpaired)
+        paired_dir_per_chain: list[str | None] = []  # indexed by protein-chain position
         if msa_result:
+            from .common import extract_chain_sequences
             msa_base = Path(in_dir) / "msas"
-            sequences = msa_result.get("sequences", [])
+            chain_sequences = extract_chain_sequences(input_str)
+            unique_seqs = list(dict.fromkeys(chain_sequences))
 
-            # Main (unpaired) MSAs — copy as colabfold_main.a3m per chain
-            for chain_idx, seq in enumerate(sequences):
+            # Main (unpaired) MSAs — one per unique sequence (content-addressed)
+            for u_idx, seq in enumerate(unique_seqs):
                 unpaired_path = msa_result.get("unpaired", {}).get(seq)
                 if unpaired_path:
                     merged = Path(unpaired_path) / "merged.a3m"
                     if merged.exists():
-                        rep_id = f"chain_{chain_idx}"
-                        chain_msa_dir = msa_base / "main" / rep_id
+                        chain_msa_dir = msa_base / "main" / f"u_{u_idx}"
                         chain_msa_dir.mkdir(parents=True, exist_ok=True)
                         msa_content = merged.read_text()
                         (chain_msa_dir / "colabfold_main.a3m").write_text(msa_content)
                         msa_dir_map[seq] = str(chain_msa_dir)
                         n_seqs = msa_content.count("\n>")
-                        print(f"[openfold3] Main MSA chain {chain_idx}: {merged.stat().st_size:,} bytes, {n_seqs} sequences")
+                        print(f"[openfold3] Main MSA u_{u_idx} ({seq[:12]}…): {merged.stat().st_size:,} bytes, {n_seqs} sequences")
 
-            # Paired MSAs — split combined pair.a3m into per-chain colabfold_paired.a3m
-            if msa_result.get("paired_dir"):
+            # Paired MSAs — split combined pair.a3m by FULL chain count
+            # (homomers preserved → each chain gets its own paired a3m).
+            paired_dir_per_chain = [None] * len(chain_sequences)
+            if msa_result.get("paired_dir") and len(chain_sequences) > 1:
                 pair_path = Path(msa_result["paired_dir"]) / "pair.a3m"
                 if pair_path.exists():
-                    per_chain = _split_paired_a3m(
+                    per_chain_a3m = _split_paired_a3m(
                         pair_path.read_text().replace("\x00", ""),
-                        len(sequences),
+                        len(chain_sequences),
                     )
                     complex_id = "complex_0"
-                    for chain_idx, (seq, a3m) in enumerate(zip(sequences, per_chain)):
-                        # Skip empty or trivial paired MSAs
+                    for chain_idx, a3m in enumerate(per_chain_a3m):
                         if not a3m.strip() or a3m.strip().count("\n") < 1:
                             print(f"[openfold3] Paired MSA chain {chain_idx}: empty, skipping")
                             continue
-                        rep_id = f"chain_{chain_idx}"
-                        paired_chain_dir = msa_base / "paired" / complex_id / rep_id
+                        paired_chain_dir = msa_base / "paired" / complex_id / f"chain_{chain_idx}"
                         paired_chain_dir.mkdir(parents=True, exist_ok=True)
                         (paired_chain_dir / "colabfold_paired.a3m").write_text(a3m)
-                        paired_dir_map[seq] = str(paired_chain_dir)
+                        paired_dir_per_chain[chain_idx] = str(paired_chain_dir)
                         n_paired = a3m.count("\n>")
                         print(f"[openfold3] Paired MSA chain {chain_idx}: {len(a3m):,} bytes, {n_paired} sequences")
-                    if paired_dir_map:
-                        print(f"[openfold3] Split paired A3M into {len(paired_dir_map)} per-chain files")
+                    n_pd = sum(1 for p in paired_dir_per_chain if p)
+                    if n_pd:
+                        print(f"[openfold3] Split paired A3M into {n_pd}/{len(chain_sequences)} per-chain files")
 
         # Convert FASTA to openfold3 query JSON with MSA directory paths
         if input_str.strip().startswith(">"):
             input_str = _fasta_to_openfold3_json(
                 input_str, input_name,
                 msa_dir_map=msa_dir_map,
-                paired_dir_map=paired_dir_map,
+                paired_dir_per_chain=paired_dir_per_chain,
             )
 
         json_path = Path(in_dir) / "query.json"
