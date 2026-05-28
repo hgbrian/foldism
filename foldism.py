@@ -1281,11 +1281,21 @@ def run_folding_job(
                             })
 
             # Build and send result immediately
-            # Send predicted CIF straight to molstar (mmCIF is its native format).
-            # Avoids the maxit subprocess hop and preserves entity-level metadata.
+            original_cif_bytes = structure_bytes if fmt == "cif" else None
             print(f"[result] {method}: structure={len(structure_bytes)} bytes, fmt={fmt}")
+            display_bytes = structure_bytes
+            display_fmt = fmt
+            if fmt == "cif":
+                try:
+                    display_bytes = _cif_to_pdb(structure_bytes)
+                    display_fmt = "pdb"
+                except Exception as e:
+                    logs.append(
+                        {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
+                    )
+
             data_payload = _build_result_payload(
-                structure_bytes, fmt, files, original_cif_bytes=None,
+                display_bytes, display_fmt, files, original_cif_bytes,
                 rmsd_ref=rmsd_to_ref.get(method),
             )
 
@@ -1294,7 +1304,7 @@ def run_folding_job(
                     "method": FOLDING_APPS[method].name,
                     "method_key": method,
                     "data": data_payload,
-                    "format": fmt,
+                    "format": display_fmt,
                 }
             ]
             logs.append({"method_complete": method})
@@ -1383,9 +1393,22 @@ def run_folding_job(
                                         "cls": "info",
                                     })
 
-                    # Send native CIF straight to molstar (mmCIF is its primary format).
+                    # Convert to PDB for viewer
+                    original_cif_bytes = structure_bytes if fmt == "cif" else None
+                    if fmt == "cif":
+                        try:
+                            structure_bytes = _cif_to_pdb(structure_bytes)
+                            fmt = "pdb"
+                        except Exception as e:
+                            logs.append(
+                                {
+                                    "msg": f"{method}: CIF to PDB failed: {e}",
+                                    "cls": "error",
+                                }
+                            )
+
                     data_payload = _build_result_payload(
-                        structure_bytes, fmt, files, original_cif_bytes=None,
+                        structure_bytes, fmt, files, original_cif_bytes,
                         rmsd_ref=rmsd_to_ref.get(method),
                     )
 
@@ -1469,10 +1492,19 @@ def run_folding_job(
         # Use aligned structure if available
         if method in structures_to_superpose:
             structure_bytes = structures_to_superpose[method]
+        original_cif_bytes = structure_bytes if fmt == "cif" else None
 
-        # Send native CIF straight to molstar.
+        if fmt == "cif":
+            try:
+                structure_bytes = _cif_to_pdb(structure_bytes)
+                fmt = "pdb"
+            except Exception as e:
+                logs.append(
+                    {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
+                )
+
         data_payload = _build_result_payload(
-            structure_bytes, fmt, files, original_cif_bytes=None,
+            structure_bytes, fmt, files, original_cif_bytes,
             rmsd_ref=rmsd_to_ref.get(method),
         )
 
