@@ -271,8 +271,12 @@ def colabsearch_fetch(sequences: list[str], use_env: bool = True) -> dict:
         {
             "unpaired": {seq: "/cache/colabsearch/unpaired/{hash}", ...},
             "paired_dir": "/cache/colabsearch/paired/{hash}" | None,
-            "sequences": [seq1, seq2, ...]
         }
+
+    Note: the result intentionally does NOT include a `sequences` list.
+    Backends must derive their chain list from the input FASTA via
+    `extract_chain_sequences(input_str)` — using a shared deduped seq list
+    silently collapses homomers and reuses bundles across batch inputs.
     """
     unpaired_base = Path("/cache/colabsearch/unpaired")
     paired_base = Path("/cache/colabsearch/paired")
@@ -283,10 +287,15 @@ def colabsearch_fetch(sequences: list[str], use_env: bool = True) -> dict:
     unpaired = {}
     paired_path = None
 
-    with ThreadPoolExecutor(max_workers=len(sequences) + 1) as pool:
+    # Dedupe for unpaired (same seq → same MSA, one cache file) but keep
+    # the full duplicate-preserving list for paired (so a homodimer triggers
+    # a paired-MSA fetch and ColabSearch produces N chain sections).
+    unique_seqs = list(dict.fromkeys(sequences))
+
+    with ThreadPoolExecutor(max_workers=len(unique_seqs) + 1) as pool:
         unpaired_futures = {
             pool.submit(_fetch_unpaired, seq, use_env, unpaired_base): seq
-            for seq in sequences
+            for seq in unique_seqs
         }
         paired_future = None
         if len(sequences) > 1:
@@ -304,5 +313,4 @@ def colabsearch_fetch(sequences: list[str], use_env: bool = True) -> dict:
     return {
         "unpaired": unpaired,
         "paired_dir": paired_path,
-        "sequences": sequences,
     }

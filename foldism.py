@@ -1,6 +1,6 @@
 """Multi-algorithm protein folding web interface.
 
-Uses backends for Boltz-2, Chai-1, Protenix, AlphaFold2, and OpenFold 3 predictions.
+Backends: Boltz-2, Chai-1, Protenix, AlphaFold 2, OpenFold 3, ESMFold 2.
 
     uv run modal run foldism.py   # run
     uv run modal deploy foldism.py   # deploy
@@ -28,6 +28,7 @@ from backends import (
     chai1_predict,
     colabsearch_fetch,
     convert_for_app,
+    esmfold2_predict,
     get_cache_key,
     get_cache_subdir,
     openfold3_predict,
@@ -129,6 +130,101 @@ def _parse_chai1_npz(npz_bytes: bytes) -> dict:
     return scores
 
 
+def _normalize_scores(algo: str, raw: dict) -> bytes:
+    """Convert algo-native scores dict to unified schema bytes.
+
+    Unified keys: method, iptm, ptm, plddt, ranking_score, has_clash, raw.
+    Per-chain / matrix scores live under `raw` for downstream consumers.
+    """
+    def _first(v):
+        return v[0] if isinstance(v, list) and v else v
+
+    if algo == "protenix":
+        unified = {
+            "iptm": raw.get("iptm"),
+            "ptm": raw.get("ptm"),
+            "plddt": raw.get("plddt"),
+            "ranking_score": raw.get("ranking_score"),
+            "has_clash": bool(raw.get("has_clash", False)),
+        }
+    elif algo == "chai1":
+        unified = {
+            "iptm": _first(raw.get("iptm")),
+            "ptm": _first(raw.get("ptm")),
+            "plddt": None,
+            "ranking_score": _first(raw.get("aggregate_score")),
+            "has_clash": bool(raw.get("has_inter_chain_clashes", False)),
+        }
+    elif algo == "openfold3":
+        plddt = raw.get("avg_plddt", raw.get("plddt"))
+        if isinstance(plddt, list):
+            plddt = sum(plddt) / len(plddt) if plddt else None
+        unified = {
+            "iptm": raw.get("iptm"),
+            "ptm": raw.get("ptm"),
+            "plddt": plddt,
+            "ranking_score": raw.get("sample_ranking_score"),
+            "has_clash": bool(raw.get("has_clash", False)),
+        }
+    elif algo == "esmfold2":
+        plddt_raw = raw.get("plddt")
+        if isinstance(plddt_raw, list):
+            plddt_raw = (sum(plddt_raw) / len(plddt_raw)) if plddt_raw else None
+        # ranking_score stays on the model-native 0-1 scale (matches the other
+        # backends' ranking outputs). plddt is rescaled to 0-100 for cross-
+        # backend pLDDT comparability.
+        ranking_score = plddt_raw if isinstance(plddt_raw, (int, float)) else None
+        plddt = plddt_raw * 100 if isinstance(plddt_raw, (int, float)) and 0 <= plddt_raw <= 1 else plddt_raw
+        unified = {
+            "iptm": None,
+            "ptm": None,
+            "plddt": plddt,
+            "ranking_score": ranking_score,
+            "has_clash": False,
+        }
+    elif algo == "boltz2":
+        plddt = raw.get("complex_plddt") or raw.get("plddt")
+        if isinstance(plddt, (int, float)) and 0 <= plddt <= 1:
+            plddt = plddt * 100
+        unified = {
+            "iptm": raw.get("iptm") or raw.get("complex_iptm"),
+            "ptm": raw.get("ptm") or raw.get("complex_ptm"),
+            "plddt": plddt,
+            "ranking_score": raw.get("confidence_score"),
+            "has_clash": bool(raw.get("has_clashes", False)),
+        }
+    elif algo == "alphafold2":
+        if "ptm" in raw or "iptm" in raw:
+            plddt = raw.get("plddt")
+            if isinstance(plddt, list):
+                plddt = (sum(plddt) / len(plddt)) if plddt else None
+            unified = {
+                "iptm": raw.get("iptm"),
+                "ptm": raw.get("ptm"),
+                "plddt": plddt,
+                "ranking_score": raw.get("iptm") if raw.get("iptm") is not None else raw.get("ptm"),
+                "has_clash": False,
+            }
+        else:
+            order = raw.get("order") or []
+            best = order[0] if order else None
+            plddts = raw.get("plddts") or {}
+            iptm_ptm = raw.get("iptm+ptm") or {}
+            unified = {
+                "iptm": None,
+                "ptm": iptm_ptm.get(best) if best else None,
+                "plddt": plddts.get(best) if best else None,
+                "ranking_score": iptm_ptm.get(best) if best in iptm_ptm else (plddts.get(best) if best else None),
+                "has_clash": False,
+            }
+    else:
+        unified = {}
+
+    unified["method"] = algo
+    unified["raw"] = raw
+    return json.dumps(unified, indent=2).encode()
+
+
 def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
     """Find best model index for given algorithm based on confidence scores."""
     files = {str(path): content for path, content in outputs}
@@ -159,7 +255,7 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     idx = int(path_str.split("_model_")[1].split(".")[0])
                     if score > best_score:
                         best_score, best_idx = score, idx
-                except:
+                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
                     pass
         return best_idx
 
@@ -176,12 +272,12 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     )
                     if score > best_score:
                         best_score, best_idx = score, idx
-                except:
+                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
                     pass
         return best_idx
 
     elif algo == "openfold3":
-        best_idx, best_score = 1, -float("inf")
+        best_idx, best_score = 0, -float("inf")
         for path, content in outputs:
             path_str = str(path)
             if "_confidences_aggregated.json" in path_str:
@@ -193,7 +289,22 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     idx = int(path_str.split("_sample_")[1].split("_")[0])
                     if score > best_score:
                         best_score, best_idx = score, idx
-                except:
+                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
+                    pass
+        return best_idx
+
+    elif algo == "esmfold2":
+        best_idx, best_score = 0, -float("inf")
+        for path, content in outputs:
+            path_str = str(path)
+            if path_str.endswith("_scores.json") and "_sample_" in path_str:
+                try:
+                    scores = json.loads(content)
+                    score = scores.get("plddt", 0)
+                    idx = int(path_str.split("_sample_")[1].split("_")[0])
+                    if score > best_score:
+                        best_score, best_idx = score, idx
+                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
                     pass
         return best_idx
 
@@ -206,6 +317,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
 
     files = {str(path): content for path, content in outputs}
     result = {}
+    raw_scores: dict | None = None
 
     if algo == "chai1":
         best_idx = _find_best_model_index(algo, outputs)
@@ -214,8 +326,8 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
             result["structure.cif"] = files[cif_key]
         npz_key = f"scores.model_idx_{best_idx}.npz"
         if npz_key in files:
-            scores = _parse_chai1_npz(files[npz_key])
-            result["scores.json"] = json.dumps(scores).encode()
+            raw_scores = _parse_chai1_npz(files[npz_key])
+            result["scores.json"] = json.dumps(raw_scores).encode()
 
     elif algo == "boltz2":
         best_idx = _find_best_model_index(algo, outputs)
@@ -227,6 +339,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 result["structure.cif"] = content
             elif f"confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
                 result["scores.json"] = content
+                raw_scores = json.loads(content)
 
     elif algo == "protenix":
         best_idx = _find_best_model_index(algo, outputs)
@@ -236,6 +349,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 result["structure.cif"] = content
             elif f"summary_confidence_sample_{best_idx}.json" in path_str:
                 result["scores.json"] = content
+                raw_scores = json.loads(content)
 
     elif algo == "alphafold2":
         for path, content in outputs:
@@ -246,6 +360,11 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 result["structure.cif"] = _pdb_to_cif(content)
             elif "ranking_debug.json" in path_str:
                 result["scores.json"] = content
+                raw_scores = json.loads(content)
+            elif "_scores_rank_001" in path_str and path_str.endswith(".json"):
+                if raw_scores is None:
+                    result["scores.json"] = content
+                    raw_scores = json.loads(content)
 
     elif algo == "openfold3":
         best_idx = _find_best_model_index(algo, outputs)
@@ -255,31 +374,42 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 result["structure.cif"] = content
             elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
                 result["scores.json"] = content
+                raw_scores = json.loads(content)
+
+    elif algo == "esmfold2":
+        best_idx = _find_best_model_index(algo, outputs)
+        for path, content in outputs:
+            path_str = str(path)
+            if path_str.endswith(f"_sample_{best_idx}.cif"):
+                result["structure.cif"] = content
+            elif path_str.endswith(f"_sample_{best_idx}_scores.json"):
+                result["scores.json"] = content
+                raw_scores = json.loads(content)
+
+    if raw_scores is not None:
+        result["unified.json"] = _normalize_scores(algo, raw_scores)
 
     return result
 
 
 def _extract_protein_sequences(fasta_str: str) -> list[str]:
-    """Extract unique protein sequences from FASTA (skipping non-protein entities)."""
-    from backends.common import ALLOWED_AAS, fasta_iter
+    """Ordered protein chain sequences from FASTA, duplicates PRESERVED.
 
-    seen = set()
-    result = []
-    for seq_id, seq in fasta_iter(fasta_str):
-        first_part = seq_id.split("|")[0].lower() if "|" in seq_id else ""
-        if first_part in {"dna", "rna", "ligand", "ion"}:
-            continue
-        if seq not in seen and all(aa.upper() in ALLOWED_AAS for aa in seq):
-            seen.add(seq)
-            result.append(seq)
-    return result
+    Duplicates are kept so colabsearch sees the true chain count and fetches
+    a paired MSA for homomers (e.g. [A, A] needs paired_dir, not just unpaired).
+    Backends still naturally dedupe inside their own per-sequence loops.
+    """
+    from backends.common import extract_chain_sequences
+
+    return extract_chain_sequences(fasta_str)
 
 
 def _fetch_msas(protein_seqs: list[str]) -> dict:
     """Pre-fetch unpaired + paired MSAs via ColabSearch. Returns MsaResult dict."""
     if not protein_seqs:
         return {}
-    print(f"Fetching MSAs for {len(protein_seqs)} unique protein sequences...")
+    n_unique = len(set(protein_seqs))
+    print(f"Fetching MSAs for {len(protein_seqs)} chain(s), {n_unique} unique...")
     return colabsearch_fetch.remote(protein_seqs)
 
 
@@ -296,8 +426,11 @@ def _build_method_params(
         input_name = match.group(0) if match else "input"
 
     if method == "boltz2":
-        params = {"input_str": converted_input, "use_msa": True}
-        if msa_result:
+        # Boltz always uses MSA internally; `use_msa` here tracks the SOURCE
+        # (True = pre-fetched ColabSearch, False = boltz's built-in server)
+        # so the cache key separates the two.
+        params = {"input_str": converted_input, "use_msa": use_msa}
+        if msa_result and use_msa:
             params["msa_result"] = msa_result
             if original_fasta:
                 params["original_fasta"] = original_fasta
@@ -308,7 +441,7 @@ def _build_method_params(
             "input_name": f"{input_name}.faa",
             "use_msa_server": use_msa,
         }
-        if msa_result:
+        if msa_result and use_msa:
             params["msa_result"] = msa_result
         return params
     elif method == "protenix":
@@ -317,13 +450,22 @@ def _build_method_params(
             "input_name": input_name,
             "use_msa": use_msa,
         }
-        if msa_result:
+        if msa_result and use_msa:
             params["msa_result"] = msa_result
         return params
     elif method == "alphafold2":
-        params: dict[str, Any] = {"input_str": converted_input, "input_name": f"{input_name}.fasta"}
-        if msa_result:
+        params: dict[str, Any] = {
+            "input_str": converted_input,
+            "input_name": f"{input_name}.fasta",
+            "use_msa": use_msa,
+        }
+        if msa_result and use_msa:
             params["msa_result"] = msa_result
+            # AF2 converter joins chains with ':' on a single FASTA line, which
+            # _build_af2_queries can't parse back into chains. Pass the original
+            # multi-record FASTA so it can recover the chain list with duplicates.
+            if original_fasta:
+                params["original_fasta"] = original_fasta
         return params
     elif method == "openfold3":
         params = {
@@ -331,7 +473,16 @@ def _build_method_params(
             "input_name": input_name,
             "use_msa": use_msa,
         }
-        if msa_result:
+        if msa_result and use_msa:
+            params["msa_result"] = msa_result
+        return params
+    elif method == "esmfold2":
+        params = {
+            "input_str": converted_input,
+            "input_name": input_name,
+            "use_msa": use_msa,
+        }
+        if msa_result and use_msa:
             params["msa_result"] = msa_result
         return params
     else:
@@ -361,6 +512,8 @@ def run_algorithm(
         outputs = alphafold_predict.remote(params=params, overwrite=overwrite)
     elif algo == "openfold3":
         outputs = openfold3_predict.remote(params=params, overwrite=overwrite)
+    elif algo == "esmfold2":
+        outputs = esmfold2_predict.remote(params=params, overwrite=overwrite)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
@@ -375,41 +528,74 @@ def run_algorithm(
 # =============================================================================
 
 
+MSA_BACKENDS = ("boltz2", "protenix", "chai1", "alphafold2", "openfold3", "esmfold2")
+
+
+def _resolve_algorithms(algorithms: str | None) -> list[str]:
+    if algorithms is None:
+        return list(FOLDING_APPS.keys())
+    algos = [a.strip() for a in algorithms.split(",")]
+    for algo in algos:
+        if algo not in FOLDING_APPS:
+            raise ValueError(f"Unknown algorithm: {algo}")
+    return algos
+
+
 @app.local_entrypoint()
 def main(
-    input_faa: str,
+    input_faa: str | None = None,
+    input_dir: str | None = None,
     algorithms: str | None = None,
     run_name: str | None = None,
     out_dir: str = "./out",
     keep_all: bool = True,
     use_msa: bool = True,
     overwrite: bool = False,
+    pattern: str = "*.faa",
 ):
-    """Run multiple folding algorithms on the same input."""
+    """Run folding algorithms on one FASTA or a directory of them.
+
+    Single file:
+        modal run foldism.py --input-faa lys.faa --algorithms esmfold2
+
+    Directory:
+        modal run foldism.py --input-dir /tmp/fastas --algorithms protenix
+    """
+    if bool(input_faa) == bool(input_dir):
+        raise ValueError("Pass exactly one of --input-faa or --input-dir")
+
+    algos_to_run = _resolve_algorithms(algorithms)
+
+    if input_dir:
+        _run_batch(input_dir, algos_to_run, out_dir, pattern, use_msa, overwrite, keep_all)
+        return
+
     with open(input_faa) as f:
         input_str = f.read()
 
     if run_name is None:
         run_name = Path(input_faa).stem
 
-    if algorithms is None:
-        algos_to_run = list(FOLDING_APPS.keys())
-    else:
-        algos_to_run = [a.strip() for a in algorithms.split(",")]
-        for algo in algos_to_run:
-            if algo not in FOLDING_APPS:
-                raise ValueError(f"Unknown algorithm: {algo}")
-
     run_dir = Path(out_dir) / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pre-fetch MSAs for backends that support it (boltz2, protenix, chai1)
     msa_result = None
-    msa_backends = [a for a in algos_to_run if a in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3")]
+    if not use_msa and "boltz2" in algos_to_run:
+        print("Note: dropping Boltz-2 from this run (Boltz only runs with MSA).")
+        algos_to_run = [a for a in algos_to_run if a != "boltz2"]
+    msa_backends = [a for a in algos_to_run if a in MSA_BACKENDS]
     if not use_msa and msa_backends:
-        print(f"Warning: --no-use-msa set; {', '.join(msa_backends)} will use their own MSA servers (slower, not cached)")
-    needs_colabsearch = use_msa and bool(msa_backends)
-    if needs_colabsearch:
+        print()
+        print("=" * 70)
+        print("WARNING: --no-use-msa selected. Per-backend behavior:")
+        print("  - AlphaFold 2:   single_sequence mode — accuracy drops a lot")
+        print("  - Protenix:      no MSA           — accuracy drops a lot")
+        print("  - OpenFold 3:    no MSA           — accuracy drops a lot")
+        print("  - Chai-1:        no MSA, ESM2 embeddings only — moderate quality")
+        print("  - ESMFold 2:     no MSA, ESMC embeddings only — its intended fast mode")
+        print("=" * 70)
+        print()
+    if use_msa and msa_backends:
         protein_seqs = _extract_protein_sequences(input_str)
         if protein_seqs:
             msa_result = _fetch_msas(protein_seqs)
@@ -417,14 +603,12 @@ def main(
     print(f"Running: {', '.join(algos_to_run)}")
     print(f"Output: {run_dir}")
 
-    # Launch all algorithms in parallel
     handles = []
     for algo in algos_to_run:
         print(f"  Spawning {FOLDING_APPS[algo].name}...")
         handle = run_algorithm.spawn(algo, input_str, run_name, use_msa=use_msa, msa_result=msa_result, overwrite=overwrite)
         handles.append((algo, handle))
 
-    # Collect results as they complete
     for algo, handle in handles:
         app_def = FOLDING_APPS[algo]
         print(f"\n{'=' * 60}\n{app_def.name} finished\n{'=' * 60}")
@@ -451,6 +635,93 @@ def main(
     print(f"\n{'=' * 60}\nComplete! Results in: {run_dir}\n{'=' * 60}")
 
 
+def _run_batch(
+    input_dir: str, algos_to_run: list[str], out_dir: str, pattern: str,
+    use_msa: bool, overwrite: bool, keep_all: bool,
+):
+    """Run folding on a directory of FASTA files using .map() for parallelism."""
+    import glob
+
+    # Boltz only runs with MSA; drop it under --no-use-msa for consistency with main().
+    if not use_msa and "boltz2" in algos_to_run:
+        print("Note: dropping Boltz-2 from this batch (Boltz only runs with MSA).")
+        algos_to_run = [a for a in algos_to_run if a != "boltz2"]
+        if not algos_to_run:
+            print("No algorithms left to run.")
+            return
+
+    files = sorted(glob.glob(f"{input_dir}/{pattern}"))
+    if not files:
+        print(f"No files matching {input_dir}/{pattern}")
+        return
+
+    todo = []
+    for f in files:
+        name = Path(f).stem
+        run_dir = Path(out_dir) / name
+        # Only skip if EVERY requested algorithm already has output.
+        if not overwrite and all(
+            (run_dir / f"{name}.{algo}.cif").exists() for algo in algos_to_run
+        ):
+            print(f"SKIP {name}")
+            continue
+        todo.append(f)
+
+    print(f"Running {len(todo)}/{len(files)} files with {', '.join(algos_to_run)}")
+    if not todo:
+        return
+
+    # MSAs are fetched PER FILE (homomers preserved, queries scoped to each input).
+    # Colabsearch caches by sequence-set server-side, so repeats are cheap.
+    file_msa: dict[str, dict | None] = {f: None for f in todo}
+    msa_backends = [a for a in algos_to_run if a in MSA_BACKENDS]
+    if use_msa and msa_backends:
+        print(f"[msa] Pre-fetching MSAs per file ({len(todo)} files)...")
+        for f in todo:
+            seqs = _extract_protein_sequences(open(f).read())
+            file_msa[f] = _fetch_msas(seqs) if seqs else None
+
+    # Spawn all (algo, file) jobs in parallel; each gets its own per-file MSA.
+    handles: list[tuple[str, str, Any]] = []  # (algo, file_path, handle)
+    for algo in algos_to_run:
+        print(f"\n=== {FOLDING_APPS[algo].name}: spawning {len(todo)} inputs ===")
+        for f in todo:
+            handles.append((
+                algo, f,
+                run_algorithm.spawn(
+                    algo, open(f).read(), Path(f).stem,
+                    use_msa=use_msa, msa_result=file_msa[f], overwrite=overwrite,
+                ),
+            ))
+
+    for algo, f, handle in handles:
+        best, all_outputs = handle.get()
+        name = Path(f).stem
+        run_dir = Path(out_dir) / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        for key, content in best.items():
+            ext = key.split(".")[-1]
+            if key.startswith("structure"):
+                out_path = run_dir / f"{name}.{algo}.{ext}"
+            else:
+                out_path = run_dir / f"{name}.{algo}.{key}"
+            out_path.write_bytes(content)
+
+        if keep_all:
+            algo_dir = run_dir / algo
+            algo_dir.mkdir(parents=True, exist_ok=True)
+            for out_file, out_content in all_outputs:
+                out_path = algo_dir / out_file
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(out_content or b"")
+
+        score = json.loads(best.get("scores.json", b"{}")).get("ranking_score", 0)
+        print(f"Done: {name}.{algo} (ranking={score:.3f})")
+
+    print(f"\n{'=' * 60}\nComplete! {len(todo)} structures in: {out_dir}\n{'=' * 60}")
+
+
 # =============================================================================
 # Web Interface (HTML template in index.html)
 # =============================================================================
@@ -469,19 +740,21 @@ def _superpose_structures(
     if ref_key not in structures:
         ref_key = keys[0]
 
+    def _longest_peptide_chain(model):
+        best, best_len = None, 0
+        for chain in model:
+            polymer = chain.get_polymer()
+            if polymer and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL:
+                n = len(polymer)
+                if n > best_len:
+                    best, best_len = chain, n
+        return best
+
     ref_doc = gemmi.cif.read_string(structures[ref_key].decode())
     ref_st = gemmi.make_structure_from_block(ref_doc[0])
     ref_model = ref_st[0]
 
-    ref_chain = None
-    max_len = 0
-    for chain in ref_model:
-        polymer = chain.get_polymer()
-        if polymer and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL:
-            if len(polymer) > max_len:
-                max_len = len(polymer)
-                ref_chain = chain
-
+    ref_chain = _longest_peptide_chain(ref_model)
     if not ref_chain:
         return structures
 
@@ -504,18 +777,7 @@ def _superpose_structures(
                 continue
             model = st[0]
 
-            target_chain = None
-            max_len = 0
-            for chain in model:
-                polymer = chain.get_polymer()
-                if (
-                    polymer
-                    and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL
-                ):
-                    if len(polymer) > max_len:
-                        max_len = len(polymer)
-                        target_chain = chain
-
+            target_chain = _longest_peptide_chain(model)
             if not target_chain:
                 result[key] = cif_bytes
                 continue
@@ -542,6 +804,105 @@ def _superpose_structures(
             result[key] = cif_bytes
 
     return result
+
+
+def _fetch_reference_pdb_bytes(pdb_id: str) -> bytes:
+    """Fetch a structure from RCSB by 4-char PDB ID (returns CIF bytes)."""
+    import urllib.request
+
+    pdb_id = pdb_id.strip().lower()
+    if not re.fullmatch(r"[a-z0-9]{4}", pdb_id):
+        raise ValueError(f"Invalid PDB ID: {pdb_id!r}")
+    url = f"https://files.rcsb.org/download/{pdb_id}.cif"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return resp.read()
+
+
+def _chain_one_letter_seq(chain) -> str:
+    """One-letter protein sequence from a gemmi chain's polymer."""
+    import gemmi
+
+    seq = []
+    for res in chain.get_polymer():
+        info = gemmi.find_tabulated_residue(res.name)
+        seq.append(info.one_letter_code.upper() if info and info.one_letter_code else "X")
+    return "".join(seq)
+
+
+def _seq_match_score(a: str, b: str) -> float:
+    """Score similarity: sum of >=5-char matching blocks / len(shorter).
+
+    Filters out 1-char matches so short peptides don't spuriously match long
+    unrelated chains via scattered single-letter coincidences.
+    """
+    from difflib import SequenceMatcher
+
+    if not a or not b:
+        return 0.0
+    min_block = min(5, min(len(a), len(b)))
+    matched = sum(blk.size for blk in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks() if blk.size >= min_block)
+    return matched / min(len(a), len(b))
+
+
+def _load_reference_structure(
+    pdb_id: str | None, uploaded_bytes: bytes | None, fasta_str: str
+) -> tuple[bytes, list[str]]:
+    """Return (filtered_cif_bytes, matched_chain_descriptions).
+
+    Keeps only chains matching a FASTA seq at >=85% identity — drops
+    antibody/light/etc. chains that the user did not include in the FASTA.
+    """
+    import gemmi
+
+    if uploaded_bytes:
+        raw = uploaded_bytes
+        source = "uploaded"
+    elif pdb_id:
+        raw = _fetch_reference_pdb_bytes(pdb_id)
+        source = pdb_id.upper()
+    else:
+        raise ValueError("No reference PDB provided")
+
+    text = raw.decode("utf-8", errors="replace")
+    if text.lstrip().startswith("data_"):
+        doc = gemmi.cif.read_string(text)
+        st = gemmi.make_structure_from_block(doc[0])
+    else:
+        st = gemmi.read_pdb_string(text)
+
+    if len(st) == 0:
+        raise ValueError(f"Reference {source}: no models")
+    model = st[0]
+
+    fasta_seqs = _extract_protein_sequences(fasta_str)
+    if not fasta_seqs:
+        raise ValueError("No protein sequences in FASTA to match against reference")
+
+    chain_seqs: dict[str, str] = {}
+    for chain in model:
+        polymer = chain.get_polymer()
+        if polymer and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL:
+            chain_seqs[chain.name] = _chain_one_letter_seq(chain)
+
+    chains_to_keep: set[str] = set()
+    matched_desc: list[str] = []
+    print(f"[ref] {source}: chains={[(n, len(s)) for n, s in chain_seqs.items()]}")
+    for cname, cseq in chain_seqs.items():
+        best_score = max((_seq_match_score(fseq, cseq) for fseq in fasta_seqs), default=0.0)
+        print(f"[ref]   {cname} ({len(cseq)} aa): best match score = {best_score:.2f}")
+        if best_score >= 0.85:
+            chains_to_keep.add(cname)
+            matched_desc.append(f"{cname} ({best_score:.0%})")
+
+    if not chains_to_keep:
+        raise ValueError(f"Reference {source}: no chains matched any FASTA sequence (>=85%)")
+
+    for cname in [c.name for c in model if c.name not in chains_to_keep]:
+        model.remove_chain(cname)
+
+    st.setup_entities()
+    doc = st.make_mmcif_document()
+    return doc.as_string().encode(), matched_desc
 
 
 def _check_cache_inline(method: str, params: dict) -> list | None:
@@ -599,6 +960,8 @@ def fold_structure_web(
             outputs = alphafold_predict.remote(params=params, job_id=job_id)
         elif method == "openfold3":
             outputs = openfold3_predict.remote(params=params, job_id=job_id)
+        elif method == "esmfold2":
+            outputs = esmfold2_predict.remote(params=params, job_id=job_id)
         else:
             return (method, None, f"Unknown method: {method}")
 
@@ -626,6 +989,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
 
     files = {}
     outputs_dict = {str(f): c for f, c in outputs}
+    raw_scores: dict | None = None
 
     if method == "boltz2":
         best_idx = _find_best_model_index(method, outputs)
@@ -637,6 +1001,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 files["structure"] = (content, "cif")
             elif "confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
                 files["scores"] = content
+                raw_scores = json.loads(content)
 
     elif method == "chai1":
         best_idx = _find_best_model_index(method, outputs)
@@ -645,8 +1010,8 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
             files["structure"] = (outputs_dict[cif_key], "cif")
         npz_key = f"scores.model_idx_{best_idx}.npz"
         if npz_key in outputs_dict:
-            scores = _parse_chai1_npz(outputs_dict[npz_key])
-            files["scores"] = json.dumps(scores).encode()
+            raw_scores = _parse_chai1_npz(outputs_dict[npz_key])
+            files["scores"] = json.dumps(raw_scores).encode()
 
     elif method == "protenix":
         best_idx = _find_best_model_index(method, outputs)
@@ -656,6 +1021,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 files["structure"] = (content, "cif")
             elif f"summary_confidence_sample_{best_idx}.json" in path_str:
                 files["scores"] = content
+                raw_scores = json.loads(content)
 
     elif method == "alphafold2":
         for path, content in outputs:
@@ -667,9 +1033,11 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 print(f"[alphafold2] Found structure: {path_str}")
             elif "ranking_debug.json" in path_str:
                 files["scores"] = content
+                raw_scores = json.loads(content)
             elif "_scores_rank_001" in path_str and path_str.endswith(".json"):
-                if "scores" not in files:
+                if raw_scores is None:
                     files["scores"] = content
+                    raw_scores = json.loads(content)
 
     elif method == "openfold3":
         best_idx = _find_best_model_index(method, outputs)
@@ -679,6 +1047,20 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 files["structure"] = (content, "cif")
             elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
                 files["scores"] = content
+                raw_scores = json.loads(content)
+
+    elif method == "esmfold2":
+        best_idx = _find_best_model_index(method, outputs)
+        for path, content in outputs:
+            path_str = str(path)
+            if path_str.endswith(f"_sample_{best_idx}.cif"):
+                files["structure"] = (content, "cif")
+            elif path_str.endswith(f"_sample_{best_idx}_scores.json"):
+                files["scores"] = content
+                raw_scores = json.loads(content)
+
+    if raw_scores is not None:
+        files["unified"] = _normalize_scores(method, raw_scores)
 
     if "structure" not in files:
         return None
@@ -688,9 +1070,15 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
 
 
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
-def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
+def run_folding_job(
+    job_id: str,
+    fasta: str,
+    methods: list[str],
+    use_msa: bool,
+    reference_pdb_id: str | None = None,
+    reference_pdb_bytes: bytes | None = None,
+):
     """Background orchestrator for folding jobs (avoids 10-min SSE timeout)."""
-    import hashlib
     import time
 
     def update_job(
@@ -714,13 +1102,34 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
             state["results"] = existing_results
         job_store[job_id] = state
 
+    # Defense in depth: UI already prevents this, but if a client submits
+    # boltz2 with use_msa=false, drop it (Boltz only runs with MSA).
+    if not use_msa and "boltz2" in methods:
+        methods = [m for m in methods if m != "boltz2"]
+        logs0 = [{"msg": "Boltz-2 skipped (requires MSA; --no-use-msa was set)", "cls": "warning"}]
+    else:
+        logs0 = []
     total = len(methods)
-    logs = [{"msg": "Checking cache...", "cls": "info"}]
+    logs = logs0 + [{"msg": "Checking cache...", "cls": "info"}]
     update_job(5, f"Starting {total} methods...", logs)
 
-    # Pre-fetch MSAs for backends that support it
+    # Check result cache for each method FIRST so fully-cached jobs skip
+    # the (slow) ColabSearch MSA fetch entirely.
+    cached_results = {}
+    methods_to_run = []
+    for method in methods:
+        cached = _check_cache_inline_for_job(method, fasta, use_msa)
+        if cached is not None:
+            cached_results[method] = [(Path(f), c) for f, c in cached]
+            logs.append(
+                {"msg": f"{FOLDING_APPS[method].name}: cached", "cls": "success"}
+            )
+        else:
+            methods_to_run.append(method)
+
+    # Only fetch MSAs if at least one method needs to actually run.
     msa_result = None
-    needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3"))
+    needs_colabsearch = use_msa and any(m in methods_to_run for m in MSA_BACKENDS)
     if needs_colabsearch:
         protein_seqs = _extract_protein_sequences(fasta)
         if protein_seqs:
@@ -733,30 +1142,19 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
             logs.append({"msg": f"MSAs ready ({n_unpaired} unpaired{paired_str})", "cls": "success"})
             update_job(8, f"Starting {total} methods...", logs)
 
-    # Check cache for each method first
-    cached_results = {}
-    methods_to_run = []
-    for method in methods:
-        cached = _check_cache_inline_for_job(method, fasta, use_msa)
-        if cached is not None:
-            cached_results[method] = [(Path(f), c) for f, c in cached]
-            logs.append(
-                {"msg": f"{FOLDING_APPS[method].name}: cached", "cls": "success"}
-            )
+    for method in methods_to_run:
+        # Boltz always uses MSA, others respect checkbox
+        if method == "boltz2":
+            msa_note = " (with MSA)"
         else:
-            methods_to_run.append(method)
-            # Boltz always uses MSA, others respect checkbox
-            if method == "boltz2":
-                msa_note = " (with MSA)"
-            else:
-                msa_note = " (with MSA)" if use_msa else ""
-            logs.append(
-                {
-                    "msg": f"Running {FOLDING_APPS[method].name}{msa_note}",
-                    "cls": "dim",
-                    "method_key": method,
-                }
-            )
+            msa_note = " (with MSA)" if use_msa else ""
+        logs.append(
+            {
+                "msg": f"Running {FOLDING_APPS[method].name}{msa_note}",
+                "cls": "dim",
+                "method_key": method,
+            }
+        )
     update_job(10, f"Running {len(methods_to_run)} methods...", logs)
 
     # Spawn only methods that need computation
@@ -767,46 +1165,96 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
 
     all_results = {}
     structures_to_superpose = {}
+    # Anchor for superposition. Starts as the reference if one was loaded;
+    # demoted to the first successfully-aligned method if reference alignment
+    # fails (e.g. reference has alien chain types / very different topology).
+    anchor_key: str | None = None
+
+    # If a reference structure was provided, load it first so it becomes the
+    # alignment anchor (existing code uses the first inserted key as anchor).
+    if reference_pdb_id or reference_pdb_bytes:
+        try:
+            ref_cif, matched = _load_reference_structure(reference_pdb_id, reference_pdb_bytes, fasta)
+            ref_name = reference_pdb_id.upper() if reference_pdb_id else "reference"
+            structures_to_superpose["reference"] = ref_cif
+            anchor_key = "reference"
+            logs.append({"msg": f"Reference {ref_name}: kept {', '.join(matched)}", "cls": "success"})
+            # Convert CIF → PDB for the viewer (matches the other backends' path
+            # and gives molstar an unambiguous polymer to render as cartoon).
+            try:
+                display_bytes = _cif_to_pdb(ref_cif)
+                display_fmt = "pdb"
+            except Exception as e:
+                logs.append({"msg": f"Reference CIF→PDB failed, sending CIF: {e}", "cls": "warning"})
+                display_bytes = ref_cif
+                display_fmt = "cif"
+            data_payload = _build_result_payload(
+                display_bytes, display_fmt,
+                {"all_files": [(f"{ref_name}.cif", ref_cif)]},
+                original_cif_bytes=ref_cif,
+            )
+            update_job(
+                10, "Reference loaded", logs,
+                [{"method": f"Reference ({ref_name})", "method_key": "reference",
+                  "data": data_payload, "format": display_fmt}],
+            )
+        except Exception as e:
+            logs.append({"msg": f"Reference load failed: {e}", "cls": "error"})
+            update_job(10, "Reference failed", logs)
 
     # Process cached results immediately - with alignment and incremental display
     for method, outputs in cached_results.items():
+        logs.append({"msg": f"{FOLDING_APPS[method].name}: processing cached files ({len(outputs)})", "cls": "dim"})
+        update_job(int(10 + (len(all_results) / total) * 70), f"Processing {FOLDING_APPS[method].name}...", logs)
         files = _process_outputs_to_files(method, outputs)
+        if not files or "structure" not in files:
+            paths_preview = ", ".join(str(p) for p, _ in outputs[:8])
+            logs.append({
+                "msg": f"{FOLDING_APPS[method].name}: cached result missing structure (files: {paths_preview}...)",
+                "cls": "error",
+                "method_complete": method,
+            })
+            all_results[method] = (None, "cached result missing structure")
+            update_job(int(10 + (len(all_results) / total) * 70), f"{len(all_results)}/{total}", logs)
+            continue
         if files and "structure" in files:
             all_results[method] = (files, None)
             structure_bytes, fmt = files["structure"]
 
             if fmt == "cif":
-                # Align to first structure
-                if not structures_to_superpose:
+                if anchor_key is None:
+                    anchor_key = method
                     structures_to_superpose[method] = structure_bytes
-                    logs.append(
-                        {
-                            "msg": f"{FOLDING_APPS[method].name}: Using as reference for alignment",
-                            "cls": "info",
-                        }
-                    )
+                    logs.append({
+                        "msg": f"{FOLDING_APPS[method].name}: Using as reference for alignment",
+                        "cls": "info",
+                    })
                 else:
                     try:
-                        ref_key = list(structures_to_superpose.keys())[0]
-                        ref_structure = structures_to_superpose[ref_key]
-                        to_align = {ref_key: ref_structure, method: structure_bytes}
-                        aligned = _superpose_structures(to_align, ref_key)
+                        ref_structure = structures_to_superpose[anchor_key]
+                        to_align = {anchor_key: ref_structure, method: structure_bytes}
+                        aligned = _superpose_structures(to_align, anchor_key)
                         structure_bytes = aligned[method]
                         structures_to_superpose[method] = structure_bytes
-                        logs.append(
-                            {
-                                "msg": f"{FOLDING_APPS[method].name}: Aligned to {FOLDING_APPS[ref_key].name}",
-                                "cls": "info",
-                            }
-                        )
+                        anchor_name = FOLDING_APPS[anchor_key].name if anchor_key in FOLDING_APPS else anchor_key
+                        logs.append({
+                            "msg": f"{FOLDING_APPS[method].name}: Aligned to {anchor_name}",
+                            "cls": "info",
+                        })
                     except Exception as e:
-                        logs.append(
-                            {
-                                "msg": f"{FOLDING_APPS[method].name}: Alignment failed: {e}",
-                                "cls": "warning",
-                            }
-                        )
+                        logs.append({
+                            "msg": f"{FOLDING_APPS[method].name}: Alignment failed: {e}",
+                            "cls": "warning",
+                        })
                         structures_to_superpose[method] = structure_bytes
+                        # If we couldn't align to the reference, demote it as anchor
+                        # and let this method anchor subsequent alignments.
+                        if anchor_key == "reference":
+                            anchor_key = method
+                            logs.append({
+                                "msg": f"Reference not usable as anchor — falling back to {FOLDING_APPS[method].name}",
+                                "cls": "info",
+                            })
 
             # Build and send result immediately
             original_cif_bytes = structure_bytes if fmt == "cif" else None
@@ -884,42 +1332,37 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                 if not error and files and "structure" in files:
                     structure_bytes, fmt = files["structure"]
                     if fmt == "cif":
-                        # Superpose to first structure immediately
-                        if not structures_to_superpose:
-                            # First structure - use as reference
+                        if anchor_key is None:
+                            anchor_key = method
                             structures_to_superpose[method] = structure_bytes
-                            logs.append(
-                                {
-                                    "msg": f"{FOLDING_APPS[method].name}: Using as reference for alignment",
-                                    "cls": "info",
-                                }
-                            )
+                            logs.append({
+                                "msg": f"{FOLDING_APPS[method].name}: Using as reference for alignment",
+                                "cls": "info",
+                            })
                         else:
-                            # Superpose this structure to the reference
                             try:
-                                ref_key = list(structures_to_superpose.keys())[0]
-                                ref_structure = structures_to_superpose[ref_key]
-                                to_align = {
-                                    ref_key: ref_structure,
-                                    method: structure_bytes,
-                                }
-                                aligned = _superpose_structures(to_align, ref_key)
+                                ref_structure = structures_to_superpose[anchor_key]
+                                to_align = {anchor_key: ref_structure, method: structure_bytes}
+                                aligned = _superpose_structures(to_align, anchor_key)
                                 structure_bytes = aligned[method]
                                 structures_to_superpose[method] = structure_bytes
-                                logs.append(
-                                    {
-                                        "msg": f"{FOLDING_APPS[method].name}: Aligned to {FOLDING_APPS[ref_key].name}",
-                                        "cls": "info",
-                                    }
-                                )
+                                anchor_name = FOLDING_APPS[anchor_key].name if anchor_key in FOLDING_APPS else anchor_key
+                                logs.append({
+                                    "msg": f"{FOLDING_APPS[method].name}: Aligned to {anchor_name}",
+                                    "cls": "info",
+                                })
                             except Exception as e:
-                                logs.append(
-                                    {
-                                        "msg": f"{FOLDING_APPS[method].name}: Alignment failed: {e}",
-                                        "cls": "warning",
-                                    }
-                                )
+                                logs.append({
+                                    "msg": f"{FOLDING_APPS[method].name}: Alignment failed: {e}",
+                                    "cls": "warning",
+                                })
                                 structures_to_superpose[method] = structure_bytes
+                                if anchor_key == "reference":
+                                    anchor_key = method
+                                    logs.append({
+                                        "msg": f"Reference not usable as anchor — falling back to {FOLDING_APPS[method].name}",
+                                        "cls": "info",
+                                    })
 
                     # Convert to PDB for viewer
                     original_cif_bytes = structure_bytes if fmt == "cif" else None
@@ -976,6 +1419,7 @@ def run_folding_job(job_id: str, fasta: str, methods: list[str], use_msa: bool):
                 ("protenix", "protenix_logs", "Protenix"),
                 ("alphafold2", "alphafold2_logs", "AlphaFold2"),
                 ("openfold3", "openfold3_logs", "OpenFold3"),
+                ("esmfold2", "esmfold2_logs", "ESMFold2"),
             ]
 
             for method_key, log_key, display_name in log_configs:
@@ -1114,6 +1558,9 @@ def web():
         fasta = request.form.get("fasta", "").strip()
         methods = request.form.getlist("method")
         use_msa = request.form.get("use_msa", "true").lower() == "true"
+        reference_pdb_id = (request.form.get("reference_pdb_id") or "").strip() or None
+        reference_file = request.files.get("reference_file")
+        reference_pdb_bytes = reference_file.read() if reference_file and reference_file.filename else None
 
         if not fasta:
             return jsonify({"error": "No sequence"}), 400
@@ -1125,7 +1572,11 @@ def web():
         job_store[job_id] = {"progress": 0, "status": "Starting...", "done": False}
 
         # Spawn the orchestrator in the background
-        run_folding_job.spawn(job_id, fasta, methods, use_msa)
+        run_folding_job.spawn(
+            job_id, fasta, methods, use_msa,
+            reference_pdb_id=reference_pdb_id,
+            reference_pdb_bytes=reference_pdb_bytes,
+        )
 
         return jsonify({"job_id": job_id})
 
@@ -1155,6 +1606,10 @@ def web():
         if not methods:
             methods = ["boltz2"]
 
+        # Boltz only runs with MSA; drop it under --no-use-msa (mirrors main /fold).
+        if not use_msa and "boltz2" in methods:
+            methods = [m for m in methods if m != "boltz2"]
+
         def generate():
             import time
             from pathlib import Path
@@ -1162,20 +1617,7 @@ def web():
             total = len(methods)
             yield f"data: {json.dumps({'progress': 5, 'status': f'Starting {total} methods...', 'log': f'Checking cache...', 'log_class': 'info'})}\n\n"
 
-            # Pre-fetch MSAs for backends that support it
-            msa_result = None
-            needs_colabsearch = use_msa and any(m in methods for m in ("boltz2", "protenix", "chai1", "alphafold2", "openfold3"))
-            if needs_colabsearch:
-                protein_seqs = _extract_protein_sequences(fasta)
-                if protein_seqs:
-                    yield f"data: {json.dumps({'log': f'Fetching MSAs for {len(protein_seqs)} sequences...', 'log_class': 'info'})}\n\n"
-                    msa_result = _fetch_msas(protein_seqs)
-                    n_unpaired = len(msa_result.get("unpaired", {}))
-                    has_paired = bool(msa_result.get("paired_dir"))
-                    paired_str = ", paired" if has_paired else ""
-                    yield f"data: {json.dumps({'log': f'MSAs ready ({n_unpaired} unpaired{paired_str})', 'log_class': 'success'})}\n\n"
-
-            # Check cache for each method first (instant, no container spawn)
+            # Check cache FIRST so fully-cached jobs skip the slow MSA fetch.
             cached_results = {}
             methods_to_run = []
             for method in methods:
@@ -1185,6 +1627,19 @@ def web():
                     yield f"data: {json.dumps({'log': f'{FOLDING_APPS[method].name}: cached', 'log_class': 'success'})}\n\n"
                 else:
                     methods_to_run.append(method)
+
+            # Only fetch MSAs for backends that will actually run.
+            msa_result = None
+            needs_colabsearch = use_msa and any(m in methods_to_run for m in MSA_BACKENDS)
+            if needs_colabsearch:
+                protein_seqs = _extract_protein_sequences(fasta)
+                if protein_seqs:
+                    yield f"data: {json.dumps({'log': f'Fetching MSAs for {len(protein_seqs)} sequences...', 'log_class': 'info'})}\n\n"
+                    msa_result = _fetch_msas(protein_seqs)
+                    n_unpaired = len(msa_result.get("unpaired", {}))
+                    has_paired = bool(msa_result.get("paired_dir"))
+                    paired_str = ", paired" if has_paired else ""
+                    yield f"data: {json.dumps({'log': f'MSAs ready ({n_unpaired} unpaired{paired_str})', 'log_class': 'success'})}\n\n"
 
             # Spawn only methods that need computation
             handles = []

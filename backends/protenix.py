@@ -24,7 +24,11 @@ from .common import (
 # Model Configuration
 # =============================================================================
 
-PROTENIX_BASE_MODEL = "protenix_base_20250630_v1.0.0"
+PROTENIX_BASE_MODEL = "protenix-v2"
+PROTENIX_HF_BUCKET = "btnaughton/bm9pc2VkcmF3"  # private HF bucket mirroring weights + CCD files
+# Pin the HF bucket revision so an upload of new weights doesn't silently
+# share cache identity with old outputs. "main" until a stable SHA is pinned.
+PROTENIX_HF_REVISION = "main"
 
 # =============================================================================
 # Image
@@ -32,69 +36,116 @@ PROTENIX_BASE_MODEL = "protenix_base_20250630_v1.0.0"
 
 
 def _setup_protenix_volume(prefix: str = "[protenix]") -> Path:
-    """Set up symlink from site-packages to volume. Returns volume_data path."""
+    """Symlink protenix's hardcoded data paths to the model volume.
+
+    v1 looked at `<site-packages>/release_data`. v2 hardcodes `/root/common/`
+    (for CCD files) and `/root/checkpoint/` (for the model `.pt`). We link
+    all three so any version finds the pre-downloaded files on the volume
+    instead of fetching from ByteDance at runtime/warmup.
+    """
     import shutil
     import site
 
-    site_pkg = Path(site.getsitepackages()[0])
-    release_data = site_pkg / "release_data"
     volume_data = Path("/models/protenix_data")
+    volume_data.mkdir(parents=True, exist_ok=True)
+    (volume_data / "checkpoint").mkdir(parents=True, exist_ok=True)
+    (volume_data / "ccd_cache").mkdir(parents=True, exist_ok=True)
 
-    if not release_data.is_symlink():
-        if release_data.exists():
-            shutil.rmtree(release_data)
-        volume_data.mkdir(parents=True, exist_ok=True)
-        release_data.symlink_to(volume_data)
-        print(f"{prefix} Symlinked {release_data} -> {volume_data}")
+    site_pkg = Path(site.getsitepackages()[0])
+    links = [
+        # (link_path, target)
+        (site_pkg / "release_data", volume_data),                    # v1 legacy
+        (Path("/root/checkpoint"), volume_data / "checkpoint"),      # v2 weights
+        (Path("/root/common"), volume_data / "ccd_cache"),           # v2 CCD/cluster/obsolete
+    ]
+    for link, target in links:
+        if link.is_symlink():
+            if link.readlink() == target:
+                continue
+            link.unlink()
+        elif link.exists():
+            shutil.rmtree(link)
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+        print(f"{prefix} Symlinked {link} -> {target}")
 
     return volume_data
 
 
-def _download_protenix_file(filepath: Path, url: str, prefix: str = "[protenix]") -> bool:
-    """Download a file if it doesn't exist. Returns True if downloaded."""
-    import subprocess
+# Marker name includes the model version so bumping PROTENIX_BASE_MODEL
+# automatically forces a fresh download instead of falsely short-circuiting
+# on a marker left by an older model release.
+PROTENIX_MARKER = Path(f"/models/protenix_data/_DOWNLOADED_{PROTENIX_BASE_MODEL}")
 
-    if filepath.exists():
-        print(f"{prefix} Already exists: {filepath.name} ({filepath.stat().st_size:,} bytes)")
+
+def _fetch_from_hf_bucket(filename: str, dest: Path, prefix: str = "[protenix]") -> bool:
+    """Download `filename` from the public HF bucket to `dest`."""
+    if dest.exists() and dest.stat().st_size > 0:
+        print(f"{prefix} Already exists: {dest.name} ({dest.stat().st_size:,} bytes)")
         return False
 
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    print(f"{prefix} Downloading {filepath.name}...")
-    subprocess.run(f'wget -q -O "{filepath}" "{url}"', shell=True, check=True)
+    from huggingface_hub import hf_hub_download
 
-    if not filepath.exists():
-        raise RuntimeError(f"Download failed: {filepath}")
-    print(f"{prefix} Downloaded: {filepath.name} ({filepath.stat().st_size:,} bytes)")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Bucket is public — no token required. If a token is set in env, HF will
+    # use it (harmless), but new users don't need to configure anything.
+    print(f"{prefix} Downloading {filename} from {PROTENIX_HF_BUCKET}@{PROTENIX_HF_REVISION}...")
+    src = hf_hub_download(
+        repo_id=PROTENIX_HF_BUCKET,
+        filename=filename,
+        revision=PROTENIX_HF_REVISION,
+        repo_type="model",
+        local_dir=str(dest.parent),
+    )
+    src_path = Path(src)
+    if src_path != dest:
+        src_path.replace(dest)
+    print(f"{prefix} Downloaded: {dest.name} ({dest.stat().st_size:,} bytes)")
     return True
 
 
 def _download_protenix_models():
-    """Download protenix models and common files to VOLUME during image build."""
-    from protenix.web_service.dependency_url import URL as PROTENIX_URLS
+    """Download protenix model + CCD files from HF bucket to VOLUME at image build,
+    then always run the warmup so CUDA kernels are compiled into the image layer
+    (even if the volume already had the files from a prior build).
+    """
+    expected_ckpt = Path("/models/protenix_data/checkpoint") / f"{PROTENIX_BASE_MODEL}.pt"
+    if PROTENIX_MARKER.exists() and expected_ckpt.exists() and expected_ckpt.stat().st_size > 0:
+        print(f"[BUILD] Protenix {PROTENIX_BASE_MODEL} files present on volume; skipping download")
+    else:
+        volume_data = _setup_protenix_volume(prefix="[BUILD]")
+        checkpoint_dir = volume_data / "checkpoint"
+        ccd_dir = volume_data / "ccd_cache"
 
-    volume_data = _setup_protenix_volume(prefix="[BUILD]")
-    checkpoint_dir = volume_data / "checkpoint"
-    ccd_dir = volume_data / "ccd_cache"
+        # (filename_in_bucket, destination_on_volume)
+        downloads = [
+            (f"{PROTENIX_BASE_MODEL}.pt", checkpoint_dir / f"{PROTENIX_BASE_MODEL}.pt"),
+            ("components.cif", ccd_dir / "components.cif"),
+            ("components.cif.rdkit_mol.pkl", ccd_dir / "components.cif.rdkit_mol.pkl"),
+            ("clusters-by-entity-40.txt", ccd_dir / "clusters-by-entity-40.txt"),
+            ("obsolete_release_date.csv", ccd_dir / "obsolete_release_date.csv"),
+        ]
+        for filename, dest in downloads:
+            _fetch_from_hf_bucket(filename, dest, prefix="[BUILD]")
+        PROTENIX_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        PROTENIX_MARKER.touch()
+        MODEL_VOLUME.commit()
 
-    downloads = [
-        (checkpoint_dir / f"{PROTENIX_BASE_MODEL}.pt", PROTENIX_URLS[PROTENIX_BASE_MODEL]),
-        (ccd_dir / "components.cif", PROTENIX_URLS["ccd_components_file"]),
-        (ccd_dir / "components.cif.rdkit_mol.pkl", PROTENIX_URLS["ccd_components_rdkit_mol_file"]),
-        (ccd_dir / "clusters-by-entity-40.txt", PROTENIX_URLS["pdb_cluster_file"]),
-        (ccd_dir / "obsolete_release_date.csv", PROTENIX_URLS["obsolete_release_data_csv"]),
-    ]
-
-    for filepath, url in downloads:
-        _download_protenix_file(filepath, url, prefix="[BUILD]")
-
-    # Run a minimal prediction to trigger CUDA kernel compilation (cached in image)
+    # ALWAYS run the warmup so the JIT-compiled CUDA kernels (fast_layer_norm_*)
+    # land in this image layer. Skipping this on rebuilds-with-files-already-present
+    # forces every cold-start runtime to recompile, which is ~minutes per container.
+    _setup_protenix_volume(prefix="[BUILD]")  # ensure symlink exists in this layer too
     import subprocess
-    print("[BUILD] Warming up protenix (compiling CUDA kernels)...")
+    print("[BUILD] Warming up protenix (compiling CUDA kernels into image layer)...")
     test_json = '[{"name": "test", "sequences": [{"proteinChain": {"sequence": "MKTAYIAKQRQISFVKSH", "count": 1}}]}]'
     Path("/tmp/warmup").mkdir(parents=True, exist_ok=True)
     Path("/tmp/warmup/test.json").write_text(test_json)
 
-    cmd = f'protenix pred --input /tmp/warmup/test.json --out_dir /tmp/warmup_out --seeds 42 --use_msa false --model_name "{PROTENIX_BASE_MODEL}"'
+    cmd = (
+        f'protenix pred --input /tmp/warmup/test.json --out_dir /tmp/warmup_out '
+        f'--seeds 42 --use_msa false --model_name "{PROTENIX_BASE_MODEL}" '
+        f'--use_default_params true'
+    )
     print(f"[BUILD] Running: {cmd}")
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     print(f"[BUILD] stdout: {result.stdout}")
@@ -145,9 +196,19 @@ def _split_paired_a3m(content: str, num_chains: int) -> list[str]:
 protenix_image = (
     Image.from_registry("nvidia/cuda:12.6.3-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "wget", "clang")
-    .env({"CUDA_HOME": "/usr/local/cuda"})
-    .pip_install("protenix==1.0.4")
-    .run_function(_download_protenix_models, gpu="L40S", volumes={"/models": MODEL_VOLUME}, timeout=3600)
+    .env({
+        "CUDA_HOME": "/usr/local/cuda",
+        # Cap ninja parallel compile workers so the build-time CUDA-kernel
+        # warmup doesn't OOM-kill its workers and silently freeze at low %.
+        "MAX_JOBS": "2",
+    })
+    .pip_install("protenix==2.0.0", "huggingface_hub>=0.27")
+    .run_function(
+        _download_protenix_models,
+        gpu="L40S",
+        volumes={"/models": MODEL_VOLUME},
+        timeout=3600,
+    )
 )
 
 # =============================================================================
@@ -216,22 +277,25 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     write_log_line(job_id, log_key, msg, "protenix")
 
     with TemporaryDirectory() as in_dir, TemporaryDirectory() as out_dir:
-        # Protenix expects per-chain paired A3M files — split the combined pair.a3m
+        # Split the combined pair.a3m by FULL chain count (duplicates preserved),
+        # so homomer chains each get their own paired MSA section.
         if msa_result and msa_result.get("paired_dir"):
+            from .common import extract_chain_sequences
+            chain_sequences = extract_chain_sequences(input_str)
             pair_path = Path(msa_result["paired_dir"]) / "pair.a3m"
-            if pair_path.exists():
+            if pair_path.exists() and len(chain_sequences) > 1:
                 per_chain = _split_paired_a3m(
                     pair_path.read_text().replace("\x00", ""),
-                    len(msa_result["sequences"]),
+                    len(chain_sequences),
                 )
                 msa_result = dict(msa_result)  # shallow copy
-                paired_per_chain = {}
-                for chain_idx, (seq, a3m) in enumerate(zip(msa_result["sequences"], per_chain)):
+                paired_per_chain_list: list[str | None] = []
+                for chain_idx, a3m in enumerate(per_chain):
                     chain_file = Path(in_dir) / f"paired_chain_{chain_idx}.a3m"
                     chain_file.write_text(a3m)
-                    paired_per_chain[seq] = str(chain_file)
-                msa_result["paired_per_chain"] = paired_per_chain
-                print(f"[protenix] Split paired A3M into {len(paired_per_chain)} per-chain files")
+                    paired_per_chain_list.append(str(chain_file))
+                msa_result["paired_per_chain"] = paired_per_chain_list
+                print(f"[protenix] Split paired A3M into {len(paired_per_chain_list)} per-chain files")
 
         if input_str.strip().startswith(">"):
             input_str = _fasta_to_protenix_json(input_str, input_name, msa_result=msa_result)
@@ -239,8 +303,25 @@ def protenix_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         json_path = Path(in_dir) / "input.json"
         json_path.write_text(input_str)
 
-        use_msa_str = "false" if msa_result else ("true" if use_msa else "false")
-        cmd = f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" --seeds {seeds} --use_msa {use_msa_str} --model_name "{PROTENIX_BASE_MODEL}"'
+        # Never let protenix call its own MSA server (protenix-server.com, bytedance-hosted).
+        # Callers must pre-fetch via colabsearch — guarded above. When we DO have
+        # msa_result, we must pass --use_msa true so protenix reads our pre-fetched
+        # unpairedMsaPath/pairedMsaPath entries from the JSON (under --use_msa false
+        # protenix silently ignores them and runs single-sequence).
+        if not msa_result and use_msa:
+            raise RuntimeError(
+                "[protenix] use_msa=True but no msa_result was provided. "
+                "Refusing to fall back to protenix's built-in MSA server. "
+                "Either supply pre-fetched MSAs (via foldism's colabsearch path) "
+                "or pass use_msa=False to run single-sequence."
+            )
+        os.environ["MMSEQS_SERVICE_HOST_URL"] = "DISABLED"  # belt-and-suspenders
+        use_msa_str = "true" if msa_result else "false"
+        cmd = (
+            f'stdbuf -oL protenix pred --input "{json_path}" --out_dir "{out_dir}" '
+            f'--seeds {seeds} --use_msa {use_msa_str} --model_name "{PROTENIX_BASE_MODEL}" '
+            f'--use_default_params true'
+        )
         print(f"Running: {cmd}")
         write_log_line(job_id, log_key, f"Command: {cmd}", "protenix")
 

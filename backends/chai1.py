@@ -108,16 +108,21 @@ def _parse_paired_a3m_chai(content: str, num_chains: int) -> dict[int, list[tupl
     return chain_seqs
 
 
-def _a3m_to_chai_parquet(msa_result: dict, work_dir: Path) -> Path:
+def _a3m_to_chai_parquet(msa_result: dict, chain_sequences: list[str], work_dir: Path) -> Path:
     """Convert A3Ms from colabsearch to Chai-1 Parquet format.
 
-    Produces one Parquet per chain: {sha256(seq.upper())}.aligned.pqt
-    Returns path to directory containing the parquet files.
+    Chai keys MSA files by sha256(seq), so output is one parquet per UNIQUE
+    sequence. For homomers, all chains share the same parquet (chai's design
+    cannot express per-chain paired hits when the chains have identical
+    sequence — both chains will use the first occurrence's paired hits).
+
+    Paired sections from pair.a3m are parsed by the FULL chain count
+    (matches what ColabSearch produced), then collapsed onto unique seqs.
     """
     import polars as pl
     from hashlib import sha256
 
-    sequences = msa_result["sequences"]
+    sequences = list(dict.fromkeys(chain_sequences))
     unpaired = msa_result["unpaired"]
     paired_dir = msa_result.get("paired_dir")
 
@@ -125,7 +130,17 @@ def _a3m_to_chai_parquet(msa_result: dict, work_dir: Path) -> Path:
     if paired_dir:
         pair_a3m_path = Path(paired_dir) / "pair.a3m"
         if pair_a3m_path.exists():
-            paired_hits = _parse_paired_a3m_chai(pair_a3m_path.read_text().replace("\x00", ""), len(sequences))
+            per_chain = _parse_paired_a3m_chai(
+                pair_a3m_path.read_text().replace("\x00", ""), len(chain_sequences)
+            )
+            # Collapse per-chain paired hits → per-unique-seq (use first occurrence)
+            first_idx_for_seq = {}
+            for i, s in enumerate(chain_sequences):
+                first_idx_for_seq.setdefault(s, i)
+            paired_hits = {
+                u_idx: per_chain.get(first_idx_for_seq[s], [])
+                for u_idx, s in enumerate(sequences)
+            }
 
     msa_dir = work_dir / "msas"
     msa_dir.mkdir(parents=True, exist_ok=True)
@@ -167,6 +182,11 @@ def _a3m_to_chai_parquet(msa_result: dict, work_dir: Path) -> Path:
 # Image
 # =============================================================================
 
+CHAI1_VOLUME_DIR = "/models/chai1"
+CHAI1_MARKER = Path(CHAI1_VOLUME_DIR) / "_DOWNLOADED"
+CHAI1_GIT_REF = "af596cbc075a1fce368cec0ab5f31be1090ca7e2"
+
+
 def _download_chai1_models():
     """Download Chai-1 models to volume during image build."""
     import os
@@ -174,9 +194,10 @@ def _download_chai1_models():
     from pathlib import Path
     from chai_lab.chai1 import run_inference
 
-    os.environ["CHAI_DOWNLOADS_DIR"] = "/models"
+    Path(CHAI1_VOLUME_DIR).mkdir(parents=True, exist_ok=True)
+    os.environ["CHAI_DOWNLOADS_DIR"] = CHAI1_VOLUME_DIR
 
-    if Path("/models/_CHAI1_MODELS_DOWNLOADED").exists():
+    if CHAI1_MARKER.exists():
         print("[chai1] Models already downloaded")
         return
 
@@ -196,7 +217,8 @@ def _download_chai1_models():
         use_esm_embeddings=True,
     )
 
-    Path("/models/_CHAI1_MODELS_DOWNLOADED").touch()
+    CHAI1_MARKER.touch()
+    MODEL_VOLUME.commit()
     print("[chai1] Models downloaded")
 
 
@@ -204,7 +226,7 @@ chai1_image = (
     Image.debian_slim()
     .apt_install("git", "wget")
     .pip_install("polars==1.19.0", "requests", "urllib3")  # requests + deps
-    .pip_install("git+https://github.com/chaidiscovery/chai-lab.git@af596cbc075a1fce368cec0ab5f31be1090ca7e2")
+    .pip_install(f"git+https://github.com/chaidiscovery/chai-lab.git@{CHAI1_GIT_REF}")
     .run_function(_download_chai1_models, gpu="A100-80GB", volumes={"/models": MODEL_VOLUME})
 )
 
@@ -220,8 +242,8 @@ def _ensure_chai1_models():
 
     MODEL_VOLUME.reload()
 
-    marker = Path("/models/_CHAI1_MODELS_DOWNLOADED")
-    if marker.exists():
+    Path(CHAI1_VOLUME_DIR).mkdir(parents=True, exist_ok=True)
+    if CHAI1_MARKER.exists():
         print("[chai1] Models already downloaded")
         return
 
@@ -231,7 +253,7 @@ def _ensure_chai1_models():
     with open("/tmp/in_dm/tmp.faa", "w") as f:
         f.write(">protein|name=pro\nMAWTPLLLLLLSHCTGSLSQPVLTQPTSL\n>ligand|name=lig\nCC\n")
 
-    os.environ["CHAI_DOWNLOADS_DIR"] = "/models"
+    os.environ["CHAI_DOWNLOADS_DIR"] = CHAI1_VOLUME_DIR
 
     run_inference(
         fasta_file=Path("/tmp/in_dm/tmp.faa"),
@@ -243,7 +265,7 @@ def _ensure_chai1_models():
         use_esm_embeddings=True,
     )
 
-    marker.touch()
+    CHAI1_MARKER.touch()
     MODEL_VOLUME.commit()
     print("[chai1] Models downloaded")
 
@@ -261,7 +283,7 @@ def chai1_predict(params: dict[str, Any], overwrite: bool = False, job_id: str |
     from tempfile import TemporaryDirectory
     from chai_lab.chai1 import run_inference
 
-    os.environ["CHAI_DOWNLOADS_DIR"] = "/models"
+    os.environ["CHAI_DOWNLOADS_DIR"] = CHAI1_VOLUME_DIR
     os.environ["PYTHONUNBUFFERED"] = "1"
 
     # Set up logging early to capture all prints
@@ -281,6 +303,16 @@ def chai1_predict(params: dict[str, Any], overwrite: bool = False, job_id: str |
         use_esm_embeddings = params.get("use_esm_embeddings", True)
         use_msa_server = params.get("use_msa_server", True)
         msa_result = params.get("msa_result")
+
+        # Cache identity assumes use_msa_server=True ⇔ ColabSearch MSA from
+        # the foldism orchestrator. Refuse it without msa_result so a direct
+        # caller can't poison the cache with chai's built-in server output.
+        if use_msa_server and not msa_result:
+            raise RuntimeError(
+                "[chai1] use_msa_server=True but no msa_result provided. "
+                "Pre-fetch via colabsearch (foldism orchestrator does this), "
+                "or pass use_msa_server=False to run chai-1 without MSA."
+            )
 
         cache_key = chai1_cache_key(params)
         cache_path = Path(f"/cache/chai1/{cache_key}")
@@ -302,7 +334,9 @@ def chai1_predict(params: dict[str, Any], overwrite: bool = False, job_id: str |
             # Convert pre-computed MSAs to Chai parquet format
             msa_directory = None
             if msa_result:
-                msa_directory = _a3m_to_chai_parquet(msa_result, Path(in_dir))
+                from .common import extract_chain_sequences
+                chain_sequences = extract_chain_sequences(input_str)
+                msa_directory = _a3m_to_chai_parquet(msa_result, chain_sequences, Path(in_dir))
                 use_msa_server = False
 
             run_inference(
