@@ -61,8 +61,16 @@ web_image = _web_image.add_local_file(str(_overrides), "/app/overrides.json") if
 # =============================================================================
 
 
-def _build_result_payload(structure_bytes: bytes, fmt: str, files: dict, original_cif_bytes: bytes | None = None) -> dict:
-    """Build result payload dict with base64-encoded data."""
+def _build_result_payload(
+    structure_bytes: bytes, fmt: str, files: dict,
+    original_cif_bytes: bytes | None = None,
+    rmsd_ref: dict | None = None,
+) -> dict:
+    """Build result payload dict with base64-encoded data.
+
+    `rmsd_ref` (optional) carries `{"rmsd": float, "n_atoms": int}` from
+    superposing this prediction onto the reference structure.
+    """
     ext = "pdb" if fmt == "pdb" else "cif"
     data_payload = {
         "structure": base64.b64encode(structure_bytes).decode("ascii"),
@@ -72,6 +80,8 @@ def _build_result_payload(structure_bytes: bytes, fmt: str, files: dict, origina
         data_payload["original_cif"] = base64.b64encode(original_cif_bytes).decode("ascii")
     if "scores" in files and files["scores"]:
         data_payload["scores"] = base64.b64encode(files["scores"]).decode("ascii")
+    if rmsd_ref:
+        data_payload["rmsd_ref"] = rmsd_ref
     if "all_files" in files and files["all_files"]:
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -176,8 +186,8 @@ def _normalize_scores(algo: str, raw: dict) -> bytes:
         ranking_score = plddt_raw if isinstance(plddt_raw, (int, float)) else None
         plddt = plddt_raw * 100 if isinstance(plddt_raw, (int, float)) and 0 <= plddt_raw <= 1 else plddt_raw
         unified = {
-            "iptm": None,
-            "ptm": None,
+            "iptm": raw.get("iptm"),
+            "ptm": raw.get("ptm"),
             "plddt": plddt,
             "ranking_score": ranking_score,
             "has_clash": False,
@@ -729,11 +739,19 @@ def _run_batch(
 
 def _superpose_structures(
     structures: dict[str, bytes], reference_key: str | None = None
-) -> dict[str, bytes]:
+) -> tuple[dict[str, bytes], dict[str, dict]]:
+    """Superpose each non-reference structure onto the reference.
+
+    Returns:
+        (aligned_structures, rmsd_info) where rmsd_info maps method_key →
+        {"rmsd": float, "n_atoms": int} for each non-reference key that was
+        successfully aligned.
+    """
     import gemmi
 
+    rmsd_info: dict[str, dict] = {}
     if len(structures) <= 1:
-        return structures
+        return structures, rmsd_info
 
     keys = list(structures.keys())
     ref_key = reference_key or keys[0]
@@ -756,7 +774,7 @@ def _superpose_structures(
 
     ref_chain = _longest_peptide_chain(ref_model)
     if not ref_chain:
-        return structures
+        return structures, rmsd_info
 
     ref_polymer = ref_chain.get_polymer()
     ptype = ref_polymer.check_polymer_type()
@@ -787,6 +805,7 @@ def _superpose_structures(
                 ref_polymer, target_polymer, ptype, gemmi.SupSelect.CaP, trim_cycles=3
             )
             print(f"[align] {key}: RMSD={sup.rmsd:.2f}, matched={sup.count} atoms")
+            rmsd_info[key] = {"rmsd": float(sup.rmsd), "n_atoms": int(sup.count)}
 
             for m in st:
                 for chain in m:
@@ -803,7 +822,7 @@ def _superpose_structures(
             traceback.print_exc()
             result[key] = cif_bytes
 
-    return result
+    return result, rmsd_info
 
 
 def _fetch_reference_pdb_bytes(pdb_id: str) -> bytes:
@@ -1169,6 +1188,9 @@ def run_folding_job(
     # demoted to the first successfully-aligned method if reference alignment
     # fails (e.g. reference has alien chain types / very different topology).
     anchor_key: str | None = None
+    # RMSD to the *reference* structure (not to another predicted method).
+    # Only populated when anchor_key == "reference" at align-time.
+    rmsd_to_ref: dict[str, dict] = {}
 
     # If a reference structure was provided, load it first so it becomes the
     # alignment anchor (existing code uses the first inserted key as anchor).
@@ -1233,9 +1255,11 @@ def run_folding_job(
                     try:
                         ref_structure = structures_to_superpose[anchor_key]
                         to_align = {anchor_key: ref_structure, method: structure_bytes}
-                        aligned = _superpose_structures(to_align, anchor_key)
+                        aligned, rmsd_info = _superpose_structures(to_align, anchor_key)
                         structure_bytes = aligned[method]
                         structures_to_superpose[method] = structure_bytes
+                        if anchor_key == "reference" and method in rmsd_info:
+                            rmsd_to_ref[method] = rmsd_info[method]
                         anchor_name = FOLDING_APPS[anchor_key].name if anchor_key in FOLDING_APPS else anchor_key
                         logs.append({
                             "msg": f"{FOLDING_APPS[method].name}: Aligned to {anchor_name}",
@@ -1270,7 +1294,10 @@ def run_folding_job(
                         {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
                     )
 
-            data_payload = _build_result_payload(display_bytes, display_fmt, files, original_cif_bytes)
+            data_payload = _build_result_payload(
+                display_bytes, display_fmt, files, original_cif_bytes,
+                rmsd_ref=rmsd_to_ref.get(method),
+            )
 
             result_to_send = [
                 {
@@ -1343,9 +1370,11 @@ def run_folding_job(
                             try:
                                 ref_structure = structures_to_superpose[anchor_key]
                                 to_align = {anchor_key: ref_structure, method: structure_bytes}
-                                aligned = _superpose_structures(to_align, anchor_key)
+                                aligned, rmsd_info = _superpose_structures(to_align, anchor_key)
                                 structure_bytes = aligned[method]
                                 structures_to_superpose[method] = structure_bytes
+                                if anchor_key == "reference" and method in rmsd_info:
+                                    rmsd_to_ref[method] = rmsd_info[method]
                                 anchor_name = FOLDING_APPS[anchor_key].name if anchor_key in FOLDING_APPS else anchor_key
                                 logs.append({
                                     "msg": f"{FOLDING_APPS[method].name}: Aligned to {anchor_name}",
@@ -1378,7 +1407,10 @@ def run_folding_job(
                                 }
                             )
 
-                    data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
+                    data_payload = _build_result_payload(
+                        structure_bytes, fmt, files, original_cif_bytes,
+                        rmsd_ref=rmsd_to_ref.get(method),
+                    )
 
                     result_to_send = [
                         {
@@ -1471,7 +1503,10 @@ def run_folding_job(
                     {"msg": f"{method}: CIF to PDB failed: {e}", "cls": "error"}
                 )
 
-        data_payload = _build_result_payload(structure_bytes, fmt, files, original_cif_bytes)
+        data_payload = _build_result_payload(
+            structure_bytes, fmt, files, original_cif_bytes,
+            rmsd_ref=rmsd_to_ref.get(method),
+        )
 
         results.append(
             {

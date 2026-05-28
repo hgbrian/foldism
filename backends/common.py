@@ -494,6 +494,9 @@ def esmfold2_cache_key(params: dict[str, Any]) -> str:
         "use_msa": params.get("use_msa", True),
         "model": "esmfold2",
         "checkpoint": f"{ESMFOLD2_HF_REPO}@{ESMFOLD2_HF_REVISION}",
+        # Bumped when scores.json schema grows (added ptm/iptm/chain_pair_iptm).
+        # Old cached entries had only plddt fields and would mask the new metrics.
+        "scores_v": "v2",
     }
     return sha256(json.dumps(cache_params, sort_keys=True).encode()).hexdigest()[:16]
 
