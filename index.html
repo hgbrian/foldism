@@ -717,9 +717,7 @@
                     resultsEl.insertBefore(downloadAllRow, resultsEl.firstChild);
                 }
 
-                const labelText = resultsData.length === totalMethods
-                    ? 'Download All'
-                    : `Download All (${resultsData.length}/${totalMethods})`;
+                const labelText = `Download All (${resultsData.length}/${totalMethods})`;
                 downloadAllRow.innerHTML = `<span style="font-weight:500;">${labelText}</span><span class="downloads"><a href="${zipUrl}" download="foldism-${inputHash}.zip">Combined ZIP</a></span>`;
             })();
 
