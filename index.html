@@ -638,6 +638,11 @@
                             .to(repr.cell)
                             .update(old => ({
                                 ...old,
+                                // Force cartoon explicitly — molstar's auto-preset on mmCIF
+                                // can fall back to ball-and-stick when the chain-id color
+                                // theme overrides it. PDB renders cartoon by default but
+                                // mmCIF needs this nudge.
+                                type: { name: 'cartoon', params: (old.type && old.type.params) || {} },
                                 colorTheme,
                             }))
                             .commit();
