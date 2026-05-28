@@ -864,6 +864,7 @@
                 let displayedResults = new Set();
                 let completedResultsData = [];
                 let pollCount = 0;
+                let hasReference = false;  // bumps the denominator when a Reference row arrives
 
                 // Poll for status
                 function getPollDelay() {
@@ -973,22 +974,20 @@
                                     console.error(`Failed to load structure for ${result.method}:`, e)
                                 );
 
-                                // Track completed results for partial download.
-                                // Skip the Reference row — it isn't a predicted fold and the
-                                // user can re-fetch it from RCSB; including it in the ZIP
-                                // also makes the "Download All" counter read N+1/N.
-                                if (!result.method.startsWith('Reference')) {
-                                    completedResultsData.push({
-                                        method: result.method,
-                                        method_key: result.method_key,
-                                        structure: resultData.original_cif || resultData.structure,
-                                        ext: resultData.original_cif ? 'cif' : resultData.ext,
-                                        all_files: resultData.zip
-                                    });
+                                // Track completed results for the ZIP. Reference rows are
+                                // included so users get the full set in one download; the
+                                // denominator is bumped by 1 to match (e.g. 3/3 = 2 backends + ref).
+                                if (result.method.startsWith('Reference')) hasReference = true;
+                                completedResultsData.push({
+                                    method: result.method,
+                                    method_key: result.method_key,
+                                    structure: resultData.original_cif || resultData.structure,
+                                    ext: resultData.original_cif ? 'cif' : resultData.ext,
+                                    all_files: resultData.zip
+                                });
 
-                                    // Update "Download All" button after each result
-                                    updateDownloadAllButton(completedResultsData, inputHash, methods.length);
-                                }
+                                // Update "Download All" button after each result
+                                updateDownloadAllButton(completedResultsData, inputHash, methods.length + (hasReference ? 1 : 0));
                             }
                         }
 
