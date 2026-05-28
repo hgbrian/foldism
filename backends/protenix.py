@@ -27,7 +27,13 @@ from .common import (
 PROTENIX_BASE_MODEL = "protenix-v2"
 PROTENIX_HF_BUCKET = "btnaughton/bm9pc2VkcmF3"  # private HF bucket mirroring weights + CCD files
 # Pin the HF bucket revision so an upload of new weights doesn't silently
-# share cache identity with old outputs. "main" until a stable SHA is pinned.
+# share cache identity with old outputs.
+#
+# TODO: replace "main" with a concrete commit SHA from
+# https://huggingface.co/btnaughton/bm9pc2VkcmF3/commits/main once stable.
+# "main" is mutable — re-uploading protenix-v2.pt to the bucket would silently
+# produce different folds under the same cache key. Bumping this string (to
+# any value) also busts the cache so it's safe to override per-deployment.
 PROTENIX_HF_REVISION = "main"
 
 # =============================================================================

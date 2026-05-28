@@ -468,8 +468,16 @@
                 if (scores.ranking_score !== undefined) metrics.ranking = scores.ranking_score;
                 if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
                 if (scores.plddt !== undefined) metrics.plddt = scores.plddt;
-                // Protenix may have pair_iptm similar to Boltz
-                if (scores.pair_iptm && typeof scores.pair_iptm === 'object') {
+                // chain_pair_iptm is an [N x N] matrix; row 0 has chain 0 vs all others.
+                // Skip the self-self diagonal (0 vs 0) so the rendered list is just
+                // the off-diagonal interface scores.
+                if (Array.isArray(scores.chain_pair_iptm) && scores.chain_pair_iptm.length > 0) {
+                    const row0 = scores.chain_pair_iptm[0];
+                    if (Array.isArray(row0) && row0.length > 1) {
+                        metrics.iptm = row0.slice(1);
+                    }
+                } else if (scores.pair_iptm && typeof scores.pair_iptm === 'object') {
+                    // Legacy v1 nested-dict format, kept as fallback.
                     const chain0 = scores.pair_iptm['0'] || scores.pair_iptm[0];
                     if (chain0) {
                         const otherChains = Object.keys(chain0).filter(k => k !== '0' && k !== 0).sort();
@@ -519,12 +527,23 @@
                     }
                 }
             } else if (method === 'ESMFold 2') {
-                // scores.json from esmfold2: {plddt: mean (0-1), plddt_per_token: [...], num_tokens, sample_index}
+                // scores.json from esmfold2: {plddt: mean (0-1), plddt_per_token: [...],
+                //   num_tokens, sample_index, ptm, iptm, chain_pair_iptm}
                 if (scores.plddt !== undefined) {
                     let p = scores.plddt;
                     if (Array.isArray(p)) p = p.reduce((a, b) => a + b, 0) / p.length;
                     // ESMFold2 reports pLDDT on 0-1; scale to 0-100 to match other backends.
                     metrics.plddt = (typeof p === 'number' && p <= 1) ? p * 100 : p;
+                }
+                if (scores.ptm !== undefined && scores.ptm !== null) metrics.ptm = scores.ptm;
+                // Per-chain-pair iptm matrix: row 0 vs every other chain.
+                if (Array.isArray(scores.chain_pair_iptm) && scores.chain_pair_iptm.length > 0) {
+                    const row0 = scores.chain_pair_iptm[0];
+                    if (Array.isArray(row0) && row0.length > 1) {
+                        metrics.iptm = row0.slice(1);
+                    }
+                } else if (scores.iptm !== undefined && scores.iptm !== null) {
+                    metrics.iptm = scores.iptm;
                 }
             }
             return metrics;
@@ -551,6 +570,16 @@
             if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence', boltzTip);
             if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'ranking', rankTip);
             if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'aggregate', chaiTip);
+            // RMSD vs reference structure (Å, computed by gemmi over Cα with iterative
+            // outlier trimming). Lower is better — distinct from the 0-1 confidence
+            // metrics above, so it gets its own renderer with a separate color scale.
+            if (metrics.rmsd_ref) {
+                const r = metrics.rmsd_ref.rmsd;
+                const n = metrics.rmsd_ref.n_atoms;
+                const cls = r <= 2 ? 'good' : r <= 5 ? 'medium' : 'poor';
+                const tip = `Cα RMSD vs reference (gemmi, ${n} matched atoms after trim)`;
+                html += `<span class="metric" data-tip="${tip}"><span class="metric-label">RMSD:</span><span class="metric-value ${cls}">${r.toFixed(2)} Å</span></span>`;
+            }
             return html ? `<span class="metrics">${html}</span>` : '';
         }
 
@@ -902,14 +931,21 @@
 
                                 // Parse scores and build metrics HTML
                                 let metricsHTML = '';
+                                let metrics = {};
                                 if (resultData.scores) {
                                     try {
                                         const scoresBytes = atob(resultData.scores);
                                         const scores = JSON.parse(scoresBytes);
-                                        const metrics = extractMetrics(scores, result.method);
-                                        metricsHTML = buildMetricsHTML(metrics, numChains);
+                                        metrics = extractMetrics(scores, result.method);
                                     } catch (e) { console.error('Failed to parse scores:', e); }
                                 }
+                                // RMSD vs reference (Å) — only present when a reference PDB was provided
+                                // and the prediction superposed onto it. From the orchestrator, not the
+                                // backend's scores.json.
+                                if (resultData.rmsd_ref && typeof resultData.rmsd_ref.rmsd === 'number') {
+                                    metrics.rmsd_ref = resultData.rmsd_ref;
+                                }
+                                metricsHTML = buildMetricsHTML(metrics, numChains);
 
                                 const item = document.createElement('div');
                                 item.className = 'result-item';

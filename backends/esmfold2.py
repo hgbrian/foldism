@@ -222,6 +222,18 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
 
     results = result if isinstance(result, list) else [result]
 
+    def _to_python(v):
+        """Convert torch tensors / numpy arrays / scalars / containers to JSON-serializable Python."""
+        if v is None:
+            return None
+        if hasattr(v, "tolist"):
+            return v.tolist()
+        if isinstance(v, dict):
+            return {str(k): _to_python(val) for k, val in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_to_python(x) for x in v]
+        return v
+
     outputs: list[tuple[Path, bytes]] = []
     for idx, sample in enumerate(results):
         complex_obj = getattr(sample, "complex", sample)
@@ -229,11 +241,17 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         plddt = complex_obj.plddt
         plddt_list = plddt.tolist() if hasattr(plddt, "tolist") else list(plddt)
         mean_plddt = (sum(plddt_list) / len(plddt_list)) if plddt_list else 0.0
+        # ESMFold 2's MolecularComplexResult also exposes ptm / iptm / pair_chains_iptm
+        # at the result (not complex) level — pull them when present so the UI
+        # can show interface confidence the same way it does for the AF3-style backends.
         scores = {
             "plddt": mean_plddt,
             "plddt_per_token": plddt_list,
             "num_tokens": len(plddt_list),
             "sample_index": idx,
+            "ptm": _to_python(getattr(sample, "ptm", None)),
+            "iptm": _to_python(getattr(sample, "iptm", None)),
+            "chain_pair_iptm": _to_python(getattr(sample, "pair_chains_iptm", None)),
         }
         outputs.append((Path(f"{input_name}_sample_{idx}.cif"), cif_str.encode()))
         outputs.append((Path(f"{input_name}_sample_{idx}_scores.json"), json.dumps(scores).encode()))
