@@ -25,16 +25,13 @@ from .common import (
 # =============================================================================
 
 PROTENIX_BASE_MODEL = "protenix-v2"
-PROTENIX_HF_BUCKET = "btnaughton/bm9pc2VkcmF3"  # private HF bucket mirroring weights + CCD files
-# Pin the HF bucket revision so an upload of new weights doesn't silently
-# share cache identity with old outputs.
-#
-# TODO: replace "main" with a concrete commit SHA from
-# https://huggingface.co/btnaughton/bm9pc2VkcmF3/commits/main once stable.
-# "main" is mutable — re-uploading protenix-v2.pt to the bucket would silently
-# produce different folds under the same cache key. Bumping this string (to
-# any value) also busts the cache so it's safe to override per-deployment.
-PROTENIX_HF_REVISION = "main"
+PROTENIX_HF_BUCKET = "btnaughton/bm9pc2VkcmF3"  # public HF bucket mirroring weights + CCD files
+# HF "buckets" are versionless blob storage — unlike model repos they have no
+# commit SHAs and `hf_hub_download(repo_type="model")` doesn't work for them.
+# We download via plain HTTP from /buckets/<user>/<bucket>/resolve/<filename>.
+# This string is a manual cache-buster: bump it whenever you re-upload files
+# to the bucket so cached predictions don't silently reuse old weights.
+PROTENIX_HF_REVISION = "2026-05-27"
 
 # =============================================================================
 # Image
@@ -85,27 +82,24 @@ PROTENIX_MARKER = Path(f"/models/protenix_data/_DOWNLOADED_{PROTENIX_BASE_MODEL}
 
 
 def _fetch_from_hf_bucket(filename: str, dest: Path, prefix: str = "[protenix]") -> bool:
-    """Download `filename` from the public HF bucket to `dest`."""
+    """Download `filename` from the public HF bucket to `dest` via plain HTTP.
+
+    Buckets aren't accessible via huggingface_hub (it expects model/dataset/space
+    repos); the public download URL is /buckets/<user>/<bucket>/resolve/<file>,
+    which 302-redirects to a signed Cloudflare CAS URL. urlretrieve follows it.
+    """
     if dest.exists() and dest.stat().st_size > 0:
         print(f"{prefix} Already exists: {dest.name} ({dest.stat().st_size:,} bytes)")
         return False
 
-    from huggingface_hub import hf_hub_download
+    import urllib.request
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Bucket is public — no token required. If a token is set in env, HF will
-    # use it (harmless), but new users don't need to configure anything.
-    print(f"{prefix} Downloading {filename} from {PROTENIX_HF_BUCKET}@{PROTENIX_HF_REVISION}...")
-    src = hf_hub_download(
-        repo_id=PROTENIX_HF_BUCKET,
-        filename=filename,
-        revision=PROTENIX_HF_REVISION,
-        repo_type="model",
-        local_dir=str(dest.parent),
-    )
-    src_path = Path(src)
-    if src_path != dest:
-        src_path.replace(dest)
+    url = f"https://huggingface.co/buckets/{PROTENIX_HF_BUCKET}/resolve/{filename}"
+    print(f"{prefix} Downloading {filename} from {url}...")
+    urllib.request.urlretrieve(url, str(dest))
+    if not dest.exists() or dest.stat().st_size == 0:
+        raise RuntimeError(f"Download failed: {dest} (0 bytes)")
     print(f"{prefix} Downloaded: {dest.name} ({dest.stat().st_size:,} bytes)")
     return True
 
