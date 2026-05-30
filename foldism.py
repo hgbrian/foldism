@@ -42,7 +42,10 @@ from backends.common import job_store
 
 _web_image = (
     Image.micromamba(python_version="3.12")
-    .micromamba_install(["maxit==11.300"], channels=["conda-forge", "bioconda"])
+    .micromamba_install(
+        ["maxit==11.300", "usalign"],
+        channels=["conda-forge", "bioconda"],
+    )
     .pip_install(
         "flask==3.1.0",
         "polars==1.19.0",
@@ -740,14 +743,23 @@ def _run_batch(
 def _superpose_structures(
     structures: dict[str, bytes], reference_key: str | None = None
 ) -> tuple[dict[str, bytes], dict[str, dict]]:
-    """Superpose each non-reference structure onto the reference.
+    """Superpose each non-reference structure onto the reference using USalign.
+
+    USalign does sequence-aware alignment (NOT just residue-number matching like
+    gemmi's calculate_superposition) so structures with different residue
+    numbering schemes still get cognate-residue Cα pairings. Reports both
+    Cα-RMSD over the aligned set and TM-score normalized by the reference
+    length (the standard fold-similarity metric: 1.0 = identical, ~0.5 = same
+    fold, < 0.17 = unrelated).
 
     Returns:
-        (aligned_structures, rmsd_info) where rmsd_info maps method_key →
-        {"rmsd": float, "n_atoms": int} for each non-reference key that was
-        successfully aligned.
+        (aligned_structures, rmsd_info) where rmsd_info[method_key] =
+        {"rmsd": float, "n_atoms": int, "tm_score": float}.
     """
-    import gemmi
+    import re
+    import subprocess
+    import tempfile
+    from pathlib import Path
 
     rmsd_info: dict[str, dict] = {}
     if len(structures) <= 1:
@@ -758,69 +770,78 @@ def _superpose_structures(
     if ref_key not in structures:
         ref_key = keys[0]
 
-    def _longest_peptide_chain(model):
-        best, best_len = None, 0
-        for chain in model:
-            polymer = chain.get_polymer()
-            if polymer and polymer.check_polymer_type() == gemmi.PolymerType.PeptideL:
-                n = len(polymer)
-                if n > best_len:
-                    best, best_len = chain, n
-        return best
-
-    ref_doc = gemmi.cif.read_string(structures[ref_key].decode())
-    ref_st = gemmi.make_structure_from_block(ref_doc[0])
-    ref_model = ref_st[0]
-
-    ref_chain = _longest_peptide_chain(ref_model)
-    if not ref_chain:
-        return structures, rmsd_info
-
-    ref_polymer = ref_chain.get_polymer()
-    ptype = ref_polymer.check_polymer_type()
-
     result = {ref_key: structures[ref_key]}
 
-    for key, cif_bytes in structures.items():
-        if key == ref_key:
-            continue
+    # Regexes parse USalign's text output. Examples:
+    #   Aligned length= 230, RMSD=   1.85, Seq_ID=n_identical/n_aligned= 0.987
+    #   TM-score= 0.95234 (normalized by length of Structure_2: L=238, d0=5.59)
+    # Structure_2 is the reference, so its TM-score is the one to report.
+    rx_aligned = re.compile(r"Aligned length=\s*(\d+)")
+    rx_rmsd = re.compile(r"RMSD=\s*([\d.]+)")
+    rx_tm_ref = re.compile(r"TM-score=\s*([\d.]+)\s*\(normalized by length of (?:Structure_2|Chain_2)")
+    rx_tm_any = re.compile(r"TM-score=\s*([\d.]+)")
 
-        try:
-            cif_str = cif_bytes.decode()
-            doc = gemmi.cif.read_string(cif_str)
-            st = gemmi.make_structure_from_block(doc[0])
-            if len(st) == 0:
-                print(f"[align] {key}: CIF has 0 models (block={doc[0].name}, size={len(cif_str)}, first_100={cif_str[:100]!r})")
-                result[key] = cif_bytes
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        ref_path = tmp / "ref.cif"
+        ref_path.write_bytes(structures[ref_key])
+
+        for key, cif_bytes in structures.items():
+            if key == ref_key:
                 continue
-            model = st[0]
+            try:
+                target_path = tmp / f"target_{key}.cif"
+                target_path.write_bytes(cif_bytes)
+                out_prefix = tmp / f"aligned_{key}"
 
-            target_chain = _longest_peptide_chain(model)
-            if not target_chain:
+                # Order: arg1 = prediction (gets transformed onto), arg2 = reference.
+                # -mm 1 -ter 1: align the WHOLE complex (all chains, fixed order)
+                #   rather than USalign's default first-chain-only behavior, so
+                #   multimers (e.g. VHH + antigen) superpose on the full assembly
+                #   instead of anchoring on one short chain. Degenerates to normal
+                #   single-chain alignment for monomers.
+                # -o <prefix>: writes the transformed prediction as full all-atom
+                #   mmCIF to <prefix>.cif (plus .pml viz scripts).
+                proc = subprocess.run(
+                    [
+                        "USalign",
+                        str(target_path), str(ref_path),
+                        "-o", str(out_prefix),
+                        "-mol", "prot",
+                        "-mm", "1", "-ter", "1",
+                    ],
+                    capture_output=True, text=True, check=False,
+                )
+                if proc.returncode != 0:
+                    print(f"[align] {key}: USalign exit={proc.returncode}, stderr={proc.stderr[:300]}")
+                    result[key] = cif_bytes
+                    continue
+
+                stdout = proc.stdout
+                m_rmsd = rx_rmsd.search(stdout)
+                m_tm = rx_tm_ref.search(stdout) or rx_tm_any.search(stdout)
+                m_n = rx_aligned.search(stdout)
+                if m_rmsd:
+                    rmsd = float(m_rmsd.group(1))
+                    n = int(m_n.group(1)) if m_n else 0
+                    tm = float(m_tm.group(1)) if m_tm else 0.0
+                    rmsd_info[key] = {"rmsd": rmsd, "n_atoms": n, "tm_score": tm}
+                    print(f"[align] {key}: RMSD={rmsd:.2f}A  TM={tm:.3f}  aligned={n}")
+                else:
+                    print(f"[align] {key}: couldn't parse RMSD/TM from USalign stdout (first 400 chars): {stdout[:400]!r}")
+
+                # USalign wrote the transformed prediction as all-atom mmCIF.
+                aligned_cif = Path(str(out_prefix) + ".cif")
+                if aligned_cif.exists() and aligned_cif.stat().st_size > 0:
+                    result[key] = aligned_cif.read_bytes()
+                else:
+                    print(f"[align] {key}: aligned CIF not found at {aligned_cif}")
+                    result[key] = cif_bytes
+            except Exception as e:
+                import traceback
+                print(f"USalign failed for {key}: {type(e).__name__}: {e}")
+                traceback.print_exc()
                 result[key] = cif_bytes
-                continue
-
-            target_polymer = target_chain.get_polymer()
-            sup = gemmi.calculate_superposition(
-                ref_polymer, target_polymer, ptype, gemmi.SupSelect.CaP, trim_cycles=3
-            )
-            print(f"[align] {key}: RMSD={sup.rmsd:.2f}, matched={sup.count} atoms")
-            rmsd_info[key] = {"rmsd": float(sup.rmsd), "n_atoms": int(sup.count)}
-
-            for m in st:
-                for chain in m:
-                    for residue in chain:
-                        for atom in residue:
-                            new = sup.transform.apply(atom.pos)
-                            atom.pos = gemmi.Position(new[0], new[1], new[2])
-
-            st.update_mmcif_block(doc[0])
-            result[key] = doc.as_string().encode()
-        except Exception as e:
-            import traceback
-            print(f"Failed to superpose {key}: {type(e).__name__}: {e}")
-            traceback.print_exc()
-            result[key] = cif_bytes
 
     return result, rmsd_info
 
