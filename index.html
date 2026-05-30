@@ -570,15 +570,23 @@
             if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence', boltzTip);
             if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'ranking', rankTip);
             if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'aggregate', chaiTip);
-            // RMSD vs reference structure (Å, computed by gemmi over Cα with iterative
-            // outlier trimming). Lower is better — distinct from the 0-1 confidence
-            // metrics above, so it gets its own renderer with a separate color scale.
+            // RMSD + TM-score vs reference, from USalign (sequence-aware alignment,
+            // so cognate residues are paired correctly regardless of numbering).
+            // RMSD: lower is better (Å). TM-score: higher is better (0-1; >0.5 = same fold).
             if (metrics.rmsd_ref) {
-                const r = metrics.rmsd_ref.rmsd;
                 const n = metrics.rmsd_ref.n_atoms;
-                const cls = r <= 2 ? 'good' : r <= 5 ? 'medium' : 'poor';
-                const tip = `Cα RMSD vs reference (gemmi, ${n} matched atoms after trim)`;
-                html += `<span class="metric" data-tip="${tip}"><span class="metric-label">RMSD:</span><span class="metric-value ${cls}">${r.toFixed(2)} Å</span></span>`;
+                if (typeof metrics.rmsd_ref.tm_score === 'number') {
+                    const tm = metrics.rmsd_ref.tm_score;
+                    const tmCls = tm >= 0.5 ? 'good' : tm >= 0.3 ? 'medium' : 'poor';
+                    const tmTip = `TM-score vs reference (USalign, normalized by reference length; >0.5 = same fold)`;
+                    html += `<span class="metric" data-tip="${tmTip}"><span class="metric-label">TM:</span><span class="metric-value ${tmCls}">${tm.toFixed(3)}</span></span>`;
+                }
+                if (typeof metrics.rmsd_ref.rmsd === 'number') {
+                    const r = metrics.rmsd_ref.rmsd;
+                    const cls = r <= 2 ? 'good' : r <= 5 ? 'medium' : 'poor';
+                    const tip = `Cα RMSD vs reference over ${n} USalign-aligned residues`;
+                    html += `<span class="metric" data-tip="${tip}"><span class="metric-label">RMSD:</span><span class="metric-value ${cls}">${r.toFixed(2)} Å</span></span>`;
+                }
             }
             return html ? `<span class="metrics">${html}</span>` : '';
         }
