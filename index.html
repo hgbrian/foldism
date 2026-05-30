@@ -555,7 +555,12 @@
             if (metrics.plddt !== undefined) html += formatMetric(metrics.plddt, 'pLDDT');
             // ipTM only meaningful for multi-chain complexes
             if (numChains > 1) {
-                if (metrics.iptm !== undefined) html += formatMetric(metrics.iptm, 'ipTM');
+                if (metrics.iptm !== undefined) {
+                    const iptmTip = Array.isArray(metrics.iptm) && metrics.iptm.length > 1
+                        ? 'Interface pTM: first chain vs each other chain (chain 1 vs 2, vs 3, …)'
+                        : 'Interface pTM: first chain vs the other chain(s)';
+                    html += formatMetric(metrics.iptm, 'ipTM', iptmTip);
+                }
             }
             if (metrics.ptm !== undefined) html += formatMetric(metrics.ptm, 'pTM');
             // Per-backend composite-score formulas (sourced from each backend's docs/code):
