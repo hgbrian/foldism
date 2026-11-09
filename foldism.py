@@ -65,7 +65,7 @@ web_image = _web_image.add_local_file(str(_overrides), "/app/overrides.json") if
 
 
 CONFIDENCE_DOWNLOAD_DIRECTORY = Path("/cache/confidence-downloads")
-CONFIDENCE_DOWNLOAD_TTL = 7 * 24 * 3600  # seconds; older array bundles are deleted when a new one is stored
+CONFIDENCE_DOWNLOAD_TTL = 90 * 24 * 3600  # seconds; older array bundles are deleted when a new one is stored
 
 
 def _store_confidence_download(files: list[tuple[str, bytes]], directory: Path | None = None) -> tuple[str, int]:
