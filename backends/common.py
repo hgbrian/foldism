@@ -29,15 +29,22 @@ CACHE_VERSION = "v2"  # v2: per-chain paired MSA, AF2 single_sequence mode, unif
 # =============================================================================
 
 
+def log_store_key(job_id: str, log_key: str) -> str:
+    """Backend logs live under their own key so they never overwrite the orchestrator's job record."""
+    return f"{job_id}:{log_key}"
+
+
+def append_logs(job_id: str, log_key: str, lines: list[str]) -> None:
+    key = log_store_key(job_id, log_key)
+    job_store[key] = (job_store.get(key) or []) + lines
+    job_store[key] = job_store[key][-1000:]  # Keep last 1000 lines
+
+
 def write_log_line(job_id: str | None, log_key: str, line: str, method_name: str = "backend"):
     """Write a single log line to job_store if job_id provided."""
     if job_id:
         try:
-            existing = job_store.get(job_id, {})
-            logs = existing.get(log_key, [])
-            logs.append(line)
-            existing[log_key] = logs[-1000:]  # Keep last 1000 lines
-            job_store[job_id] = existing
+            append_logs(job_id, log_key, [line])
         except Exception as e:
             print(f"[{method_name}] Failed to write log: {e}")
 
@@ -59,11 +66,7 @@ class LoggingOutput:
         import time
         if self.log_buffer and self.job_id:
             try:
-                existing = job_store.get(self.job_id, {})
-                logs = existing.get(self.log_key, [])
-                logs.extend(self.log_buffer)
-                existing[self.log_key] = logs[-1000:]
-                job_store[self.job_id] = existing
+                append_logs(self.job_id, self.log_key, self.log_buffer)
             except Exception as e:
                 self.original_stdout.write(f"[{self.log_key}] Failed to flush logs: {e}\n")
             self.log_buffer = []

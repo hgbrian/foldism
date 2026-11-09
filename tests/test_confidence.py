@@ -597,3 +597,34 @@ def test_structure_zip_contains_percentile_metadata():
     result = foldism._build_result_payload(b'data_test', 'cif', {'unified': unified, 'all_files': [('model.cif', b'data_test')]})
     with zipfile.ZipFile(io.BytesIO(base64.b64decode(result['zip']))) as archive:
         assert archive.read('foldism_unified_scores.json') == unified
+
+
+@pytest.mark.parametrize('route', ['/fold', '/fold-sse'])
+def test_unknown_method_is_rejected(route):
+    app = foldism.web.local()
+    with app.test_client() as client:
+        response = client.post(route, data={'fasta': '>a\nACDEFGHIK', 'method': 'nope'})
+        assert b'Unknown method: nope' in response.data
+
+
+def test_backend_logs_do_not_touch_the_job_record(monkeypatch):
+    from backends import common
+    store = {'job1': {'done': False, 'results': []}}
+    monkeypatch.setattr(common, 'job_store', store)
+    common.append_logs('job1', 'esmfold2_logs', ['a', 'b'])
+    common.append_logs('job1', 'esmfold2_logs', ['c'])
+    assert store['job1'] == {'done': False, 'results': []}
+    assert store[common.log_store_key('job1', 'esmfold2_logs')] == ['a', 'b', 'c']
+
+
+def test_old_confidence_downloads_are_deleted(monkeypatch, tmp_path):
+    import os
+    import time
+    monkeypatch.setattr(foldism, 'CACHE_VOLUME', SimpleNamespace(commit=lambda: None))
+    old = tmp_path / ('1' * 64 + '.zip')
+    old.write_bytes(b'x')
+    stale = time.time() - foldism.CONFIDENCE_DOWNLOAD_TTL - 10
+    os.utime(old, (stale, stale))
+    foldism._store_confidence_download([('sample_confidence_arrays.npz', b'data')], tmp_path)
+    assert not old.exists()
+    assert len(list(tmp_path.glob('*.zip'))) == 1

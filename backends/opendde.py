@@ -24,7 +24,7 @@ from .common import (
     app,
     extract_chain_sequences,
     fasta_iter,
-    job_store,
+    append_logs,
     opendde_cache_key,
     write_log_line,
 )
@@ -194,7 +194,7 @@ def _fasta_to_opendde_json(
 
 @app.function(
     image=opendde_image,
-    timeout=max(TIMEOUT * 60, 2 * 60 * 60),
+    timeout=TIMEOUT * 60,
     gpu="A100-40GB",
     cpu=6,
     memory=65_536,
@@ -275,9 +275,7 @@ def opendde_predict(
             print(line, flush=True)
             log_buffer.append(line)
             if len(log_buffer) >= 25 and job_id:
-                state = job_store.get(job_id, {})
-                state[log_key] = (state.get(log_key, []) + log_buffer)[-1000:]
-                job_store[job_id] = state
+                append_logs(job_id, log_key, log_buffer)
                 log_buffer.clear()
 
         try:
@@ -303,9 +301,7 @@ def opendde_predict(
             )
         finally:
             if log_buffer and job_id:
-                state = job_store.get(job_id, {})
-                state[log_key] = (state.get(log_key, []) + log_buffer)[-1000:]
-                job_store[job_id] = state
+                append_logs(job_id, log_key, log_buffer)
 
         validate_outputs(output_path, num_samples)
         (output_path / "runtime_provenance.json").write_text(json.dumps(runtime))

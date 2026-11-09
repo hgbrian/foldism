@@ -51,6 +51,7 @@
         .results-table tr.result-item { display:table-row; }
         .results-table td { padding:12px; border-bottom:1px solid #e2e8f0; vertical-align:middle; }
         .results-table .model-cell { white-space:nowrap; }
+        .model-rmsd { margin-left:8px; font-size:12px; color:#64748b; }
         .results-table .model-marker { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
         .confidence-values { font-size:14px; font-variant-numeric:tabular-nums; white-space:nowrap; }
         .confidence-pairs { color:#64748b; white-space:nowrap; }
@@ -719,14 +720,6 @@
             downloadAllPending = null;
         }
 
-        // Re-enable submit button when textarea is edited after a run
-        document.getElementById('fasta-input').addEventListener('input', () => {
-            const submitBtn = document.getElementById('submit-btn');
-            if (submitBtn.disabled) {
-                submitBtn.disabled = false;
-            }
-        });
-
         document.getElementById('fold-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const fasta = document.getElementById('fasta-input').value.trim();
@@ -955,7 +948,11 @@
                                 const item = document.createElement('tr');
                                 item.className = 'result-item';
                                 item.dataset.method = result.method;
-                                item.innerHTML = `<td class="model-cell"><input type="checkbox" aria-label="Show ${result.method} structure" checked onchange="toggleStructureVisibility('${result.method}', this.checked)"><span class="model-marker" style="background:${colorStr}"></span>${result.method}</td>${metricsHTML}<td><span class="downloads">${downloads}</span></td>`;
+                                const rmsdRef = metrics.rmsd_ref;
+                                const rmsdHTML = rmsdRef
+                                    ? `<span class="model-rmsd" title="Cα RMSD and TM-score against the reference (USalign)">RMSD ${rmsdRef.rmsd.toFixed(2)} Å${typeof rmsdRef.tm_score === 'number' ? ` · TM ${rmsdRef.tm_score.toFixed(2)}` : ''}</span>`
+                                    : '';
+                                item.innerHTML = `<td class="model-cell"><input type="checkbox" aria-label="Show ${result.method} structure" checked onchange="toggleStructureVisibility('${result.method}', this.checked)"><span class="model-marker" style="background:${colorStr}"></span>${result.method}${rmsdHTML}</td>${metricsHTML}<td><span class="downloads">${downloads}</span></td>`;
                                 // Insert alphabetically. Reference rows (label starts with "Reference") pin to the top.
                                 const isRef = result.method && result.method.startsWith('Reference');
                                 const existing = Array.from(tableBody.querySelectorAll('.result-item[data-method]'));

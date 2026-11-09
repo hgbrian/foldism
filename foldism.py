@@ -12,7 +12,9 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import re
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -32,7 +34,7 @@ from backends import (
     opendde_predict,
     mol1_predict,
 )
-from backends.common import job_store
+from backends.common import job_store, log_store_key
 
 # =============================================================================
 # Web Image
@@ -63,6 +65,7 @@ web_image = _web_image.add_local_file(str(_overrides), "/app/overrides.json") if
 
 
 CONFIDENCE_DOWNLOAD_DIRECTORY = Path("/cache/confidence-downloads")
+CONFIDENCE_DOWNLOAD_TTL = 7 * 24 * 3600  # seconds; older array bundles are deleted when a new one is stored
 
 
 def _store_confidence_download(files: list[tuple[str, bytes]], directory: Path | None = None) -> tuple[str, int]:
@@ -81,7 +84,12 @@ def _store_confidence_download(files: list[tuple[str, bytes]], directory: Path |
     token = digest.hexdigest()
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{token}.zip"
-    if not destination.exists():
+    for old in directory.glob("*.zip"):
+        if old != destination and time.time() - old.stat().st_mtime > CONFIDENCE_DOWNLOAD_TTL:
+            old.unlink(missing_ok=True)
+    if destination.exists():
+        os.utime(destination)
+    else:
         with NamedTemporaryFile(dir=directory, suffix=".zip", delete=False) as temporary:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
                 for name, content in files:
@@ -1013,7 +1021,12 @@ def run_folding_job(
         if protein_seqs:
             logs.append({"msg": f"Fetching MSAs for {len(protein_seqs)} sequences...", "cls": "info"})
             update_job(5, "Fetching MSAs...", logs)
-            msa_result = _fetch_msas(protein_seqs)
+            try:
+                msa_result = _fetch_msas(protein_seqs)
+            except Exception as e:
+                logs.append({"msg": f"MSA fetch failed: {e}", "cls": "error"})
+                update_job(100, "MSA fetch failed", logs, done=True)
+                return
             n_unpaired = len(msa_result.get("unpaired", {}))
             has_paired = bool(msa_result.get("paired_dir"))
             paired_str = ", paired" if has_paired else ""
@@ -1170,7 +1183,7 @@ def run_folding_job(
 
     pending = list(handles)
     completed = len(cached_results)
-    max_wait_time = 60 * 20  # 20 minutes max wait per method
+    max_wait_time = 55 * 60  # the orchestrator itself times out at 60 minutes
     start_time = {}
     for method, _ in handles:
         start_time[method] = __import__("time").time()
@@ -1183,6 +1196,10 @@ def run_folding_job(
             # Check if method has exceeded max wait time
             elapsed = __import__("time").time() - start_time[method]
             if elapsed > max_wait_time:
+                try:
+                    handle.cancel()
+                except Exception as e:
+                    print(f"Could not cancel {method}: {e}")
                 logs.append(
                     {
                         "msg": f"{FOLDING_APPS[method].name}: Timeout after {int(elapsed / 60)} minutes",
@@ -1299,7 +1316,6 @@ def run_folding_job(
 
         # Check for and forward logs from all running methods
         try:
-            state = job_store.get(job_id, {})
             log_configs = [
                 ("alphafold2", "alphafold2_logs", "AlphaFold2"),
                 ("esmfold2", "esmfold2_logs", "ESMFold2"),
@@ -1310,8 +1326,8 @@ def run_folding_job(
             for method_key, log_key, display_name in log_configs:
                 # Forward logs for all selected methods, not just pending (catches final logs)
                 if method_key in methods:
-                    if log_key in state and state[log_key]:
-                        new_logs = state[log_key]
+                    new_logs = job_store.get(log_store_key(job_id, log_key))
+                    if new_logs:
                         last_count_attr = f"_last_{log_key}_count"
                         last_count = getattr(update_job, last_count_attr, 0)
                         if len(new_logs) > last_count:
@@ -1468,6 +1484,9 @@ def web():
 
         if not methods:
             methods = ["esmfold2"]
+        unknown = [m for m in methods if m not in FOLDING_APPS]
+        if unknown:
+            return jsonify({"error": f"Unknown method: {', '.join(unknown)}"}), 400
 
         job_id = str(uuid.uuid4())[:12]
         job_store[job_id] = {"progress": 0, "status": "Starting...", "done": False}
@@ -1509,6 +1528,12 @@ def web():
 
         if not methods:
             methods = ["esmfold2"]
+        unknown = [m for m in methods if m not in FOLDING_APPS]
+        if unknown:
+            return Response(
+                "data: " + json.dumps({"error": f"Unknown method: {', '.join(unknown)}"}) + "\n\n",
+                mimetype="text/event-stream",
+            )
 
         def generate():
             import time
