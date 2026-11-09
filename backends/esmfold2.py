@@ -33,6 +33,8 @@ ESMFOLD2_HF_REPO = "biohub/ESMFold2"
 ESMFOLD2_HF_REVISION = "1afea82e432079d9af2ebd71d1e4c339ecca2ff0"
 ESMFOLD2_VOLUME_DIR = "/models/esmfold2"
 ESMFOLD2_GIT_REF = "c94ed8d"
+ESMC_HF_REPO = "biohub/ESMC-6B"
+ESMC_HF_REVISION = "45b0fa5d7fb06faefbd5e3b89bdcef35d564e79a"
 
 # =============================================================================
 # Image
@@ -65,6 +67,62 @@ def _download_esmfold2_models():
     print(f"[BUILD] ESMFold2 weights downloaded ({sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file()):,} bytes)")
 
 
+def _download_pinned_esmc() -> None:
+    """Cache the encoder revision validated with this ESMFold2 runtime."""
+    from huggingface_hub import snapshot_download
+
+    MODEL_VOLUME.reload()
+    snapshot_download(
+        repo_id=ESMC_HF_REPO,
+        revision=ESMC_HF_REVISION,
+        cache_dir=ESMFOLD2_VOLUME_DIR,
+        allow_patterns=["*.safetensors", "*.json"],
+    )
+    MODEL_VOLUME.commit()
+
+
+def _require_loaded_weights(info: dict, *, encoder: bool = False) -> None:
+    """Reject incomplete weights before attempting a prediction."""
+    unexpected = [
+        key for key in info.get("unexpected_keys", [])
+        if not (encoder and (key.startswith("lm_head.") or key.endswith("._extra_state")))
+    ]
+    if unexpected or any(info.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
+        raise RuntimeError(f"Incomplete pretrained weight loading: {info}")
+
+
+def _load_pinned_esmfold2():
+    """Load the same fold and encoder checkpoints as the validated benchmark."""
+    import torch
+    from transformers.models.esmc.modeling_esmc import ESMCModel
+    from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
+
+    model, info = ESMFold2Model.from_pretrained(
+        ESMFOLD2_HF_REPO,
+        revision=ESMFOLD2_HF_REVISION,
+        local_files_only=True,
+        load_esmc=False,
+        output_loading_info=True,
+    )
+    _require_loaded_weights(info)
+    model = model.cuda().eval()
+    encoder_path = (
+        Path(ESMFOLD2_VOLUME_DIR) / "models--biohub--ESMC-6B"
+        / "snapshots" / ESMC_HF_REVISION
+    )
+    encoder, encoder_info = ESMCModel.from_pretrained(
+        str(encoder_path), local_files_only=True, output_loading_info=True,
+    )
+    _require_loaded_weights(encoder_info, encoder=True)
+    encoder = encoder.to(device="cuda", dtype=torch.bfloat16).eval()
+    for parameter in encoder.parameters():
+        parameter.requires_grad_(False)
+    model._esmc = encoder
+    model._esmc_fp8 = False
+    print(f"[esmfold2] Verified fold {ESMFOLD2_HF_REVISION}; encoder {ESMC_HF_REVISION}")
+    return model
+
+
 esmfold2_image = (
     Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.12")
     .apt_install("git", "wget")
@@ -82,6 +140,12 @@ esmfold2_image = (
         volumes={"/models": MODEL_VOLUME},
         timeout=3600,
     )
+)
+
+esmfold2_image = (esmfold2_image
+    .pip_install("gemmi", "numpy")
+    .run_function(_download_pinned_esmc, volumes={"/models": MODEL_VOLUME}, timeout=1800)
+    .add_local_file(Path(__file__).with_name("confidence.py"), "/opt/foldism/confidence.py")
 )
 
 
@@ -154,6 +218,12 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     """Run ESMFold2 structure prediction."""
     import json
     import time
+    import sys
+    import tempfile
+    import numpy as np
+    sys.path.insert(0, "/opt/foldism")
+    from confidence import calculate, esm_fold, protein_structure
+    from .common import extract_chain_sequences
 
     input_str = params["input_str"]
     input_name = params.get("input_name", "input")
@@ -174,11 +244,13 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     log_key = "esmfold2_logs"
     write_log_line(job_id, log_key, "[esmfold2] Starting...", "esmfold2")
 
+    from .confidence import cache_supports
+
     cache_key = esmfold2_cache_key(params)
     cache_path = Path(f"/cache/esmfold2/{cache_key}")
     cache_marker = cache_path / "_COMPLETE"
 
-    if not overwrite and cache_marker.exists():
+    if not overwrite and cache_marker.exists() and cache_supports(cache_path, bool(params.get("calculate_actifptm", True) or params.get("download_confidence_data", True)), bool(params.get("download_confidence_data", True))):
         msg = f"[esmfold2] Cache HIT: {cache_key}"
         print(msg)
         write_log_line(job_id, log_key, msg, "esmfold2")
@@ -190,15 +262,9 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     write_log_line(job_id, log_key, msg, "esmfold2")
 
     from esm.models.esmfold2 import ESMFold2InputBuilder
-    from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
-
     MODEL_VOLUME.reload()
     t0 = time.time()
-    model = ESMFold2Model.from_pretrained(
-        ESMFOLD2_HF_REPO,
-        revision=ESMFOLD2_HF_REVISION,
-        local_files_only=True,  # rely on volume cache populated at build time
-    ).cuda().eval()
+    model = _load_pinned_esmfold2()
     msg = f"[esmfold2] Model loaded in {time.time() - t0:.1f}s"
     print(msg)
     write_log_line(job_id, log_key, msg, "esmfold2")
@@ -208,8 +274,10 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     write_log_line(job_id, log_key, f"[esmfold2] {n_entities} entities, samples={num_samples}, steps={num_steps}, use_msa={use_msa and msa_result is not None}", "esmfold2")
 
     t0 = time.time()
-    result = ESMFold2InputBuilder().fold(
+    results, captured = esm_fold(
         model, spi,
+        calculate_actifptm=bool(params.get("calculate_actifptm", True) or params.get("download_confidence_data", True)),
+        download_confidence_data=bool(params.get("download_confidence_data", True)),
         num_loops=num_loops,
         num_sampling_steps=num_steps,
         num_diffusion_samples=num_samples,
@@ -220,7 +288,6 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
     print(msg)
     write_log_line(job_id, log_key, msg, "esmfold2")
 
-    results = result if isinstance(result, list) else [result]
 
     def _to_python(v):
         """Convert torch tensors / numpy arrays / scalars / containers to JSON-serializable Python."""
@@ -235,7 +302,7 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         return v
 
     outputs: list[tuple[Path, bytes]] = []
-    for idx, sample in enumerate(results):
+    for idx, (sample, confidence) in enumerate(zip(results, captured, strict=True)):
         complex_obj = getattr(sample, "complex", sample)
         cif_str = complex_obj.to_mmcif()
         plddt = complex_obj.plddt
@@ -253,6 +320,32 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
             "iptm": _to_python(getattr(sample, "iptm", None)),
             "chain_pair_iptm": _to_python(getattr(sample, "pair_chains_iptm", None)),
         }
+        with tempfile.TemporaryDirectory() as directory:
+            cif_path = Path(directory) / "structure.cif"
+            cif_path.write_text(cif_str)
+            ca, chains, sequences = protein_structure(cif_path)
+        if sequences != extract_chain_sequences(input_str):
+            raise ValueError("ESMFold2 structure sequences differ from ordered inputs")
+        indices = np.flatnonzero(confidence["mask"])
+        if len(indices) != len(ca):
+            raise ValueError("ESMFold2 protein confidence requires protein-only inputs")
+        native_ids = list(dict.fromkeys(confidence["chains"][indices].tolist()))
+        observed_ids = confidence["chains"][indices].tolist()
+        if observed_ids != sorted(observed_ids, key=native_ids.index):
+            raise ValueError("ESMFold2 native chain tokens are interleaved")
+        native_counts = [int((confidence["chains"][indices] == value).sum()) for value in native_ids]
+        if native_counts != [len(sequence) for sequence in sequences]:
+            raise ValueError("ESMFold2 confidence chain order differs from inputs")
+        scores["interface_confidence"] = calculate(
+            confidence["pae"][np.ix_(indices, indices)], ca, chains,
+            scores["chain_pair_iptm"], confidence.get("active"),
+            bool(params.get("calculate_actifptm", True) or params.get("download_confidence_data", True)), native_ids,
+        )
+        if params.get("download_confidence_data", True):
+            import io
+            buffer = io.BytesIO()
+            np.savez_compressed(buffer, **confidence["confidence_arrays"])
+            outputs.append((Path(f"{input_name}_sample_{idx}_confidence_arrays.npz"), buffer.getvalue()))
         outputs.append((Path(f"{input_name}_sample_{idx}.cif"), cif_str.encode()))
         outputs.append((Path(f"{input_name}_sample_{idx}_scores.json"), json.dumps(scores).encode()))
 
@@ -261,6 +354,8 @@ def esmfold2_predict(params: dict[str, Any], overwrite: bool = False, job_id: st
         out_path = cache_path / rel_path
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(content)
+    if params.get("download_confidence_data", True) and not cache_supports(cache_path, True, True):
+        raise ValueError("Requested confidence arrays are missing from prediction outputs")
     cache_marker.touch()
     CACHE_VOLUME.commit()
 

@@ -1,8 +1,8 @@
-"""Backend prediction functions for Boltz-2, Chai-1, Protenix, AlphaFold 2, OpenFold 3, and ESMFold 2.
+"""Backend prediction functions for AlphaFold 2, ESMFold 2, OpenDDE, and Mol-1.
 
 Each backend downloads models to a persistent Modal Volume (`foldism-models`)
-on first build under per-backend subdirs (e.g. `/models/boltz2/`, `/models/chai1/`).
-GPU is configurable via GPU environment variable (default: L40S, Chai-1/AF2 use A100-80GB).
+on first build under per-backend subdirs (e.g. `/models/mol1/`).
+Each backend selects its own GPU: ESMFold 2 and OpenDDE use A100-40GB; Mol-1 and AlphaFold 2 use A100-80GB.
 """
 
 from .common import (
@@ -15,26 +15,22 @@ from .common import (
     get_cache_subdir,
 )
 from .alphafold2 import alphafold_predict
-from .boltz import boltz2_predict
-from .chai1 import chai1_predict
 from .colabsearch import colabsearch_fetch
 from .esmfold2 import esmfold2_predict
-from .openfold3 import openfold3_predict
-from .protenix import protenix_predict
+from .opendde import opendde_predict
+from .mol1 import mol1_predict
 
 __all__ = [
     "CACHE_VOLUME",
     "FOLDING_APPS",
     "alphafold_predict",
     "app",
-    "boltz2_predict",
-    "chai1_predict",
     "check_cache",
     "colabsearch_fetch",
     "convert_for_app",
     "esmfold2_predict",
     "get_cache_key",
     "get_cache_subdir",
-    "openfold3_predict",
-    "protenix_predict",
+    "opendde_predict",
+    "mol1_predict",
 ]

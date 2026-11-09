@@ -133,6 +133,9 @@ def _build_af2_queries(
                 if any(blocks.values()):
                     paired_msa = [blocks.get(i, "") for i in range(len(chain_sequences))]
 
+        if paired_msa is None:
+            paired_msa = [f">{101 + index}\n{sequence}\n" for index, sequence in enumerate(chain_sequences)]
+
         a3m_str = msa_to_str(unpaired_msa, paired_msa, chain_sequences, [1] * len(chain_sequences))
         query_sequence = ":".join(chain_sequences)
     else:
@@ -187,6 +190,7 @@ alphafold_image = (
         gpu="a10g",
     )
     .run_function(_download_alphafold2_models, volumes={"/models": MODEL_VOLUME}, timeout=3600)
+    .pip_install("gemmi", "numpy")
 )
 
 # =============================================================================
@@ -208,6 +212,10 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
     from tempfile import TemporaryDirectory
     from colabfold.batch import get_queries, run as colabfold_run
 
+    from colabfold.alphafold import models as models_module
+
+    original_loader = None
+    original_extra = None
     MODEL_VOLUME.reload()
     af2_data_dir = Path(ALPHAFOLD2_VOLUME_DIR)
     if not ALPHAFOLD2_MARKER.exists():
@@ -244,11 +252,13 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
                 "or pass use_msa=False to run msa_mode=single_sequence."
             )
 
+        from .confidence import cache_supports
+
         cache_key = alphafold_cache_key(params)
         cache_path = Path(f"/cache/alphafold2/{cache_key}")
         cache_marker = cache_path / "_COMPLETE"
 
-        if not overwrite and cache_marker.exists():
+        if not overwrite and cache_marker.exists() and cache_supports(cache_path, bool(params.get("calculate_actifptm", True) or params.get("download_confidence_data", True)), bool(params.get("download_confidence_data", True))):
             print(f"[alphafold2] Cache HIT: {cache_key} (returning cached result)")
             CACHE_VOLUME.reload()
             logging_stdout.flush()
@@ -282,6 +292,19 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
             msa_mode = "single_sequence" if not use_msa else "mmseqs2_uniref_env"
             print(f"[alphafold2] msa_mode={msa_mode}, msa_result={'yes' if msa_result else 'no'}")
 
+            from .confidence import callbacks, attach
+            from colabfold.alphafold import extra_ptm
+            active = bool(params.get("calculate_actifptm", True) or params.get("download_confidence_data", True))
+            original_loader = models_module.load_models_and_params
+
+            def load_native_score_heads(*args, **kwargs):
+                # Retain native PAE distributions for pair ipTM even with actifpTM off.
+                kwargs["calc_extra_ptm"] = True
+                return original_loader(*args, **kwargs)
+
+            models_module.load_models_and_params = load_native_score_heads
+            original_extra, wrapper, callback, compact = callbacks(active, Path(out_dir) if params.get("download_confidence_data", True) else None)
+            extra_ptm.get_chain_and_interface_metrics = wrapper
             colabfold_run(
                 queries=queries,
                 result_dir=out_dir,
@@ -295,8 +318,15 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
                 data_dir=af2_data_dir,
                 msa_mode=msa_mode,
                 zip_results=False,
+                calc_extra_ptm=active,
+                use_probs_extra=True,
+                prediction_callback=callback,
             )
 
+            extra_ptm.get_chain_and_interface_metrics = original_extra
+            attach(Path(out_dir), compact)
+            if not compact:
+                raise RuntimeError("AlphaFold2 produced no scored predictions; inspect the ColabFold log")
             outputs = [
                 (f.relative_to(out_dir), f.read_bytes())
                 for f in Path(out_dir).rglob("*")
@@ -309,10 +339,16 @@ def alphafold_predict(params: dict[str, Any], overwrite: bool = False, job_id: s
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_path.write_bytes(content)
 
+            if params.get("download_confidence_data", True) and not cache_supports(cache_path, True, True):
+                raise ValueError("Requested confidence arrays are missing from prediction outputs")
             cache_marker.touch()
             CACHE_VOLUME.commit()
 
             return outputs
     finally:
+        if original_loader is not None:
+            models_module.load_models_and_params = original_loader
+        if original_extra is not None:
+            extra_ptm.get_chain_and_interface_metrics = original_extra
         logging_stdout.flush()
         sys.stdout, sys.stderr = old_stdout, old_stderr

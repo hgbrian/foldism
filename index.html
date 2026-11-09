@@ -40,6 +40,22 @@
         .metric[data-tip]:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; max-width: 350px; white-space: normal; z-index: 1000; margin-bottom: 4px; }
         .example-link { font-size: 13px; color: #666; margin-top: 10px; }
         .example-link a { color: #2563eb; }
+        .active-option { display:block; margin-top:8px; font-size:13px; }
+        .active-option span, .confidence-note { color:#64748b; font-size:12px; }
+        .model-name { display:inline-block; min-width:96px; }
+        .confidence-percentile { display:inline-block; margin-left:5px; padding:2px 5px; border-radius:4px; background:#e0f2ed; color:#166453; font-size:10px; font-weight:600; }
+        .percentile-note { margin:9px 2px; color:#64748b; font-size:12px; line-height:1.5; }
+        .results-table-wrap { overflow-x:auto; margin-bottom:12px; }
+        .results-table { width:100%; border-collapse:collapse; font-size:13px; }
+        .results-table th { padding:10px 12px; text-align:left; color:#475569; background:#eaf1fa; font-size:12px; font-weight:600; }
+        .results-table tr.result-item { display:table-row; }
+        .results-table td { padding:12px; border-bottom:1px solid #e2e8f0; vertical-align:middle; }
+        .results-table .model-cell { white-space:nowrap; }
+        .results-table .model-marker { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }
+        .confidence-values { font-size:14px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+        .confidence-pairs { color:#64748b; white-space:nowrap; }
+        .pair-separator { color:#94a3b8; padding:0 3px; }
+        .results-table .downloads { white-space:nowrap; }
     </style>
 </head>
 <body>
@@ -58,32 +74,29 @@
   </svg>
   <h1 style="color: #333; font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; margin: 0;">foldism</h1>
 </div>
-    <p class="subtitle">Protein structure prediction with AlphaFold 2, Boltz-2, Chai-1, ESMFold 2, OpenFold 3, Protenix</p>
+    <p class="subtitle">Protein structure prediction with ESMFold 2, OpenDDE, Mol-1, and AlphaFold 2</p>
     <div class="panel">
         <h2>Input Sequence</h2>
         <form id="fold-form">
             <textarea id="fasta-input" name="fasta" placeholder="Paste FASTA sequence here..."></textarea>
             <div class="methods">
                 <label><input type="checkbox" name="method" value="alphafold2"> AlphaFold 2</label>
-                <label id="label-boltz2"><input type="checkbox" name="method" value="boltz2"> Boltz-2</label>
-                <label><input type="checkbox" name="method" value="chai1"> Chai-1</label>
                 <label><input type="checkbox" name="method" value="esmfold2" checked> ESMFold 2</label>
-                <label><input type="checkbox" name="method" value="openfold3"> OpenFold 3</label>
-                <label><input type="checkbox" name="method" value="protenix"> Protenix</label>
+                <label><input type="checkbox" name="method" value="opendde"> OpenDDE</label>
+                <label><input type="checkbox" name="method" value="mol1"> Mol-1</label>
             </div>
             <div style="margin: 8px 0; font-size: 13px; color: #666;">
-                <label style="cursor:pointer;"><input type="checkbox" id="use-msa" checked style="margin-right: 4px;">Use MSA <span style="color:#999;">(recommended — fetches via ColabSearch and shares one MSA across all 6 backends)</span></label>
+                <label style="cursor:pointer;"><input type="checkbox" id="use-msa" checked style="margin-right: 4px;">Use MSA <span style="color:#999;">(recommended — fetches via ColabSearch and shares MSAs across selected models)</span></label>
                 <details style="margin-top: 4px; font-size: 12px;">
                     <summary style="cursor:pointer; color: #888;">What happens when MSA is off?</summary>
                     <ul style="margin: 6px 0 0 18px; padding: 0; color: #666;">
-                        <li><b>Boltz-2</b> — disabled (Boltz only runs with MSA).</li>
-                        <li><b>AlphaFold 2</b> — runs in <code>single_sequence</code> mode. Accuracy drops a lot.</li>
-                        <li><b>Protenix</b> — runs without MSA. Accuracy drops a lot.</li>
-                        <li><b>OpenFold 3</b> — runs without MSA. Accuracy drops a lot.</li>
-                        <li><b>Chai-1</b> — no MSA, falls back to ESM2 embeddings only. Moderate quality.</li>
-                        <li><b>ESMFold 2</b> — no MSA, falls back to ESMC embeddings only. This is its intended fast mode.</li>
+                        <li><b>AlphaFold 2</b> — runs in <code>single_sequence</code> mode.</li>
+                        <li><b>ESMFold 2</b> — runs without MSA, using sequence embeddings.</li>
+                        <li><b>OpenDDE</b> — runs without MSA.</li>
+                        <li><b>Mol-1</b> — runs without MSA.</li>
                     </ul>
                 </details>
+                <div class="active-option"><span id="confidence-download-estimate">Confidence array downloads: ~25 MB per model at 300 total residues; ~250 MB at 1,000, before compression.</span><br><span>Structure ZIPs include scores and percentiles, but no confidence arrays. Download arrays separately for each model.</span></div>
             </div>
             <div style="margin: 8px 0; font-size: 13px; color: #666; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                 <label for="reference-pdb-id" style="white-space: nowrap;">Reference PDB:</label>
@@ -119,7 +132,7 @@
     <script>
         let viewer = null;
         let loadedStructures = {};
-        const methodColors = {'Boltz-2': '#3B82F6', 'Chai-1': '#EF4444', 'Protenix': '#22C55E', 'AlphaFold2': '#F59E0B', 'OpenFold 3': '#8B5CF6', 'ESMFold 2': '#EC4899'};
+        const methodColors = {'OpenDDE': '#0D9488', 'Mol-1': '#6366F1', 'AlphaFold2': '#F59E0B', 'ESMFold 2': '#EC4899'};
         function colorForMethod(name) {
             if (methodColors[name]) return methodColors[name];
             if (name && name.startsWith('Reference')) return '#6B7280';
@@ -158,21 +171,6 @@
                 viewer = v;
                 loadExamples();
             });
-
-            // Disable Boltz-2 when MSA is off — Boltz only runs with MSA.
-            const useMsaEl = document.getElementById('use-msa');
-            const boltzEl = document.querySelector('input[name="method"][value="boltz2"]');
-            const boltzLabel = document.getElementById('label-boltz2');
-            function syncBoltz() {
-                const off = !useMsaEl.checked;
-                boltzEl.disabled = off;
-                if (off) boltzEl.checked = false;
-                boltzLabel.style.opacity = off ? '0.4' : '1';
-                boltzLabel.style.cursor = off ? 'not-allowed' : '';
-                boltzLabel.title = off ? 'Boltz-2 requires MSA' : '';
-            }
-            useMsaEl.addEventListener('change', syncBoltz);
-            syncBoltz();
         });
 
         let defaultExamples = {
@@ -181,9 +179,9 @@
             'Lysozyme': '>Lysozyme\nKVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL'
         };
 
-        // Load overrides.json if present (replaces default examples)
+        // Add configured examples without hiding the built-in examples.
         fetch('/overrides.json').then(r => r.ok ? r.json() : null).then(data => {
-            if (data && data.examples) { defaultExamples = data.examples; loadExamples(); }
+            if (data && data.examples) { defaultExamples = {...defaultExamples, ...data.examples}; loadExamples(); }
         }).catch(() => {});
 
         function getExamples() {
@@ -257,11 +255,9 @@
 
         // Method configurations for log sections
         const methodConfigs = {
-            'boltz2': { name: 'Boltz-2', prefix: '[Boltz]' },
-            'chai1': { name: 'Chai-1', prefix: '[Chai-1]' },
-            'protenix': { name: 'Protenix', prefix: '[Protenix]' },
+            'opendde': { name: 'OpenDDE', prefix: '[OpenDDE]' },
+            'mol1': { name: 'Mol-1', prefix: '[Mol-1]' },
             'alphafold2': { name: 'AlphaFold2', prefix: '[AlphaFold2]' },
-            'openfold3': { name: 'OpenFold 3', prefix: '[OpenFold3]' },
             'esmfold2': { name: 'ESMFold 2', prefix: '[ESMFold2]' }
         };
 
@@ -312,11 +308,9 @@
 
             // Special handling for detailed logs from any method
             const detailedLogPrefixes = {
-                '[Boltz]': { key: 'boltz2', name: 'Boltz-2' },
-                '[Chai-1]': { key: 'chai1', name: 'Chai-1' },
-                '[Protenix]': { key: 'protenix', name: 'Protenix' },
+                '[OpenDDE]': { key: 'opendde', name: 'OpenDDE' },
+                '[Mol-1]': { key: 'mol1', name: 'Mol-1' },
                 '[AlphaFold2]': { key: 'alphafold2', name: 'AlphaFold2' },
-                '[OpenFold3]': { key: 'openfold3', name: 'OpenFold 3' },
                 '[ESMFold2]': { key: 'esmfold2', name: 'ESMFold 2' }
             };
 
@@ -427,79 +421,9 @@
 
         function extractMetrics(scores, method) {
             if (!scores) return {};
+            if (scores.interface_confidence) return { interface_confidence: scores.interface_confidence };
             const metrics = {};
-            if (method === 'Boltz-2') {
-                if (scores.confidence_score !== undefined) metrics.confidence = scores.confidence_score;
-                if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
-                if (scores.complex_plddt !== undefined) metrics.plddt = scores.complex_plddt;
-                // Extract per-chain ipTM from chain 0's perspective (A vs B, A vs C, etc)
-                if (scores.pair_chains_iptm && scores.pair_chains_iptm['0']) {
-                    const chain0 = scores.pair_chains_iptm['0'];
-                    const otherChains = Object.keys(chain0).filter(k => k !== '0').sort();
-                    if (otherChains.length > 0) {
-                        metrics.iptm = otherChains.map(k => chain0[k]);
-                    }
-                } else if (scores.iptm !== undefined) {
-                    metrics.iptm = scores.iptm;
-                }
-            } else if (method === 'Chai-1') {
-                if (scores.aggregate_score) metrics.aggregate = Array.isArray(scores.aggregate_score) ? scores.aggregate_score[0] : scores.aggregate_score;
-                if (scores.ptm) metrics.ptm = Array.isArray(scores.ptm) ? scores.ptm[0] : scores.ptm;
-                // pLDDT: per-residue array, compute mean
-                if (scores.plddt !== undefined) {
-                    const plddt = Array.isArray(scores.plddt) && Array.isArray(scores.plddt[0]) ? scores.plddt[0] : scores.plddt;
-                    metrics.plddt = Array.isArray(plddt)
-                        ? plddt.reduce((a, b) => a + b, 0) / plddt.length
-                        : plddt;
-                }
-                // Extract per-chain ipTM from chain 0's perspective (A vs B, A vs C, etc)
-                // per_chain_pair_iptm is [num_chains, num_chains] - row 0 has chain 0 vs all others
-                if (scores.per_chain_pair_iptm && Array.isArray(scores.per_chain_pair_iptm)) {
-                    const matrix = scores.per_chain_pair_iptm;
-                    // Handle nested array structure [[[]]] from npz
-                    const row0 = Array.isArray(matrix[0]) && Array.isArray(matrix[0][0]) ? matrix[0][0] : matrix[0];
-                    if (row0 && row0.length > 1) {
-                        metrics.iptm = row0.slice(1);  // Skip diagonal (0 vs 0), get 0 vs 1, 0 vs 2, etc
-                    }
-                } else if (scores.iptm) {
-                    metrics.iptm = Array.isArray(scores.iptm) ? scores.iptm[0] : scores.iptm;
-                }
-            } else if (method === 'Protenix') {
-                if (scores.ranking_score !== undefined) metrics.ranking = scores.ranking_score;
-                if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
-                if (scores.plddt !== undefined) metrics.plddt = scores.plddt;
-                // chain_pair_iptm is an [N x N] matrix; row 0 has chain 0 vs all others.
-                // Skip the self-self diagonal (0 vs 0) so the rendered list is just
-                // the off-diagonal interface scores.
-                if (Array.isArray(scores.chain_pair_iptm) && scores.chain_pair_iptm.length > 0) {
-                    const row0 = scores.chain_pair_iptm[0];
-                    if (Array.isArray(row0) && row0.length > 1) {
-                        metrics.iptm = row0.slice(1);
-                    }
-                } else if (scores.pair_iptm && typeof scores.pair_iptm === 'object') {
-                    // Legacy v1 nested-dict format, kept as fallback.
-                    const chain0 = scores.pair_iptm['0'] || scores.pair_iptm[0];
-                    if (chain0) {
-                        const otherChains = Object.keys(chain0).filter(k => k !== '0' && k !== 0).sort();
-                        if (otherChains.length > 0) {
-                            metrics.iptm = otherChains.map(k => chain0[k]);
-                        }
-                    }
-                } else if (scores.iptm !== undefined) {
-                    metrics.iptm = scores.iptm;
-                }
-            } else if (method === 'OpenFold 3') {
-                if (scores.avg_plddt !== undefined) metrics.plddt = scores.avg_plddt;
-                if (scores.ptm !== undefined) metrics.ptm = scores.ptm;
-                if (scores.iptm !== undefined) metrics.iptm = scores.iptm;
-                if (scores.sample_ranking_score !== undefined) metrics.ranking = scores.sample_ranking_score;
-                if (scores.chain_pair_iptm && typeof scores.chain_pair_iptm === 'object') {
-                    const entries = Object.entries(scores.chain_pair_iptm);
-                    if (entries.length > 0) {
-                        metrics.iptm = entries.map(([, v]) => v);
-                    }
-                }
-            } else if (method === 'AlphaFold2') {
+            if (method === 'AlphaFold2') {
                 // ranking_debug.json format: {plddts: {model_1: 85.2}, order: [...]}
                 if (scores.plddts) {
                     const plddtVals = Object.values(scores.plddts);
@@ -549,6 +473,72 @@
             return metrics;
         }
 
+        async function readFoldismResponse(response) {
+            const unavailable = 'Foldism is unavailable. The temporary test server may have stopped.';
+            if (!response.ok) throw new Error(`${unavailable} HTTP ${response.status}.`);
+            if (!response.headers.get('content-type')?.includes('application/json')) {
+                throw new Error(unavailable);
+            }
+            try {
+                return await response.json();
+            } catch {
+                throw new Error(unavailable);
+            }
+        }
+
+        function confidenceFileSize(bytes) {
+            const divisor = bytes >= 1e9 ? 1e9 : 1e6;
+            const value = bytes / divisor;
+            return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${bytes >= 1e9 ? 'GB' : 'MB'}`;
+        }
+
+        function updateConfidenceDownloadEstimate() {
+            const fasta = document.getElementById('fasta-input').value;
+            const residues = fasta.split('\n').filter(line => !line.trim().startsWith('>')).join('').replace(/[^A-Za-z]/g, '').length;
+            if (!residues) return;
+            const models = document.querySelectorAll('input[name="method"]:checked').length;
+            // Full 64-bin float32 PAE distributions dominate the uncompressed size.
+            const bytes = residues * residues * (64 * 4 + 8);
+            document.getElementById('confidence-download-estimate').textContent =
+                `Confidence array downloads: ~${confidenceFileSize(bytes)} per model; ~${confidenceFileSize(bytes * models)} total for ${models} selected. Before compression; ${residues} total residues.`;
+        }
+        document.getElementById('fasta-input').addEventListener('input', updateConfidenceDownloadEstimate);
+        document.querySelectorAll('input[name="method"]').forEach(input => input.addEventListener('change', updateConfidenceDownloadEstimate));
+
+        function confidenceTable(scores) {
+            const escape = value => String(value).replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+            const pairs = scores.pairs || [];
+            const pairLabels = pairs.map(pair => pair.map(escape).join('–')).join(' / ');
+            const cells = ['iptm', 'ipsae', 'ipdae', 'actifptm'].map(key => {
+                const values = pairs.map((pair, index) => {
+                    const value = scores[key]?.[index];
+                    const status = scores.status?.[key]?.[index] || 'unavailable';
+                    const display = Number.isFinite(value) ? Number(value).toPrecision(2) : '—';
+                    const percentile = scores.percentiles?.[key]?.[index];
+                    const contactNote = scores.percentile_status?.[key]?.[index] === 'no_contacts_ranked_as_zero'
+                        ? ' No interface contacts; ranked as zero.' : '';
+                    const badge = Number.isFinite(percentile)
+                        ? `<span class="confidence-percentile" title="${percentile.toFixed(1)}th percentile among measured nonbinders; targets have equal weight. Not a binding probability.${contactNote}">P${Math.round(percentile)}</span>` : '';
+                    return `<span title="${escape(status.replaceAll('_',' '))}">${display}</span>${badge}`;
+                }).join('<span class="pair-separator">/</span>');
+                return `<td class="confidence-values">${values || '—'}</td>`;
+            }).join('');
+            return `<td class="confidence-pairs">${pairLabels || '—'}</td>${cells}`;
+        }
+
+        function outputTableBody(resultsEl) {
+            let body = resultsEl.querySelector('.results-table tbody');
+            if (!body) {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'results-table-wrap';
+                wrapper.innerHTML = '<table class="results-table" aria-label="Prediction confidence scores"><thead><tr><th scope="col">Model</th><th scope="col">Chain pairs</th><th scope="col">ipTM</th><th scope="col">ipSAE</th><th scope="col">ipDAE</th><th scope="col">actifpTM</th><th scope="col">Downloads</th></tr></thead><tbody></tbody></table>';
+                wrapper.insertAdjacentHTML('beforeend', '<p class="percentile-note">P95 means the score exceeds approximately 95% of the nonbinder reference, with ties split equally. Each target has equal weight. Reference: 200 measured nonbinders across 23 targets. This is not a binding probability. Percentiles apply only to MSA-backed predictions with two protein chains and the binder first; AlphaFold2 has no reference.</p>');
+                resultsEl.appendChild(wrapper);
+                body = wrapper.querySelector('tbody');
+            }
+            return body;
+        }
+
         function buildMetricsHTML(metrics, numChains) {
             if (!metrics || Object.keys(metrics).length === 0) return '';
             let html = '';
@@ -563,18 +553,6 @@
                 }
             }
             if (metrics.ptm !== undefined) html += formatMetric(metrics.ptm, 'pTM');
-            // Per-backend composite-score formulas (sourced from each backend's docs/code):
-            //   Boltz-2 confidence_score = 0.8 * complex_pLDDT + 0.2 * ipTM (pTM for monomers)
-            //   Chai-1  aggregate_score   = 0.2 * complex_pTM + 0.8 * interface_pTM - 100*has_clashes
-            //   Protenix/OpenFold3 ranking_score: not publicly documented; higher = better
-            const boltzTip = numChains > 1
-                ? '0.8 * complex_pLDDT + 0.2 * ipTM'
-                : '0.8 * complex_pLDDT + 0.2 * pTM (ipTM doesn\'t exist for monomers)';
-            const chaiTip  = '0.2 * complex_pTM + 0.8 * interface_pTM - 100 * has_clashes';
-            const rankTip  = 'Model-internal composite (not publicly documented). Higher = better.';
-            if (metrics.confidence !== undefined) html += formatMetric(metrics.confidence, 'confidence', boltzTip);
-            if (metrics.ranking !== undefined) html += formatMetric(metrics.ranking, 'ranking', rankTip);
-            if (metrics.aggregate !== undefined) html += formatMetric(metrics.aggregate, 'aggregate', chaiTip);
             // RMSD + TM-score vs reference, from USalign (sequence-aware alignment,
             // so cognate residues are paired correctly regardless of numbering).
             // RMSD: lower is better (Å). TM-score: higher is better (0-1; >0.5 = same fold).
@@ -727,11 +705,13 @@
                     downloadAllRow.id = 'download-all-row';
                     downloadAllRow.className = 'result-item';
                     downloadAllRow.style.background = '#e0f2fe';
+                    downloadAllRow.style.flexWrap = 'wrap';
+                    downloadAllRow.style.gap = '8px';
                     resultsEl.insertBefore(downloadAllRow, resultsEl.firstChild);
                 }
 
-                const labelText = `Download All (${resultsData.length}/${totalMethods})`;
-                downloadAllRow.innerHTML = `<span style="font-weight:500;">${labelText}</span><span class="downloads"><a href="${zipUrl}" download="foldism-${inputHash}.zip">Combined ZIP</a></span>`;
+                const labelText = `Structures and scores (${resultsData.length}/${totalMethods})`;
+                downloadAllRow.innerHTML = `<span><span style="font-weight:500;">${labelText}</span><small style="display:block; margin-top:4px; color:#475569;">Confidence arrays are not included. Use each model’s “Confidence arrays” download.</small></span><span class="downloads"><a href="${zipUrl}" download="foldism-${inputHash}.zip">Combined ZIP · no arrays</a></span>`;
             })();
 
             downloadAllPending = updatePromise;
@@ -751,6 +731,7 @@
             e.preventDefault();
             const fasta = document.getElementById('fasta-input').value.trim();
             if (!fasta) { alert('Please enter a sequence'); return; }
+            updateConfidenceDownloadEstimate();
             const methods = Array.from(document.querySelectorAll('input[name="method"]:checked')).map(el => el.value);
             if (methods.length === 0) { alert('Please select at least one method'); return; }
 
@@ -861,6 +842,8 @@
             formData.append('fasta', fasta);
             methods.forEach(m => formData.append('method', m));
             formData.append('use_msa', useMsa ? 'true' : 'false');
+            formData.append('calculate_actifptm', 'true');
+            formData.append('download_confidence_data', 'true');
             const refPdbId = document.getElementById('reference-pdb-id').value.trim();
             const refFile = document.getElementById('reference-file').files[0];
             if (refPdbId) formData.append('reference_pdb_id', refPdbId);
@@ -869,8 +852,9 @@
             try {
                 // Submit job and get job_id
                 const response = await fetch('/fold', { method: 'POST', body: formData });
-                const { job_id, error: submitError } = await response.json();
-                if (submitError) { log('Error: ' + submitError, 'error'); return; }
+                const { job_id, error: submitError } = await readFoldismResponse(response);
+                if (submitError) throw new Error(submitError);
+                if (!job_id) throw new Error('Foldism did not return a job ID.');
 
                 // Track displayed logs and results to avoid duplicates
                 let displayedLogs = 0;
@@ -889,7 +873,7 @@
                     pollCount++;
                     try {
                         const statusRes = await fetch('/status/' + job_id);
-                        const data = await statusRes.json();
+                        const data = await readFoldismResponse(statusRes);
 
                         if (data.error) {
                             log('Error: ' + data.error, 'error');
@@ -938,9 +922,13 @@
 
                                 const methodSlug = result.method.toLowerCase().replace(/[^a-z0-9]/g, '');
                                 let downloads = `<a href="${downloadUrl}" download="${methodSlug}-${inputHash}.${downloadExt}">Structure</a>`;
-                                if (resultData.zip) {
+                                if (resultData.zip && result.method_key !== 'reference') {
                                     const zipUrl = base64ToBlob(resultData.zip, 'application/zip');
-                                    downloads += `<a href="${zipUrl}" download="${methodSlug}-${inputHash}_all.zip">All Files</a>`;
+                                    downloads += `<a href="${zipUrl}" download="${methodSlug}-${inputHash}_all.zip">Structure + scores</a>`;
+                                }
+
+                                if (resultData.confidence_arrays_url) {
+                                    downloads += `<a href="${resultData.confidence_arrays_url}" download>Confidence arrays${Number.isFinite(resultData.confidence_arrays_bytes) ? ` · ${confidenceFileSize(resultData.confidence_arrays_bytes)}` : ''}</a>`;
                                 }
 
                                 // Parse scores and build metrics HTML
@@ -959,15 +947,18 @@
                                 if (resultData.rmsd_ref && typeof resultData.rmsd_ref.rmsd === 'number') {
                                     metrics.rmsd_ref = resultData.rmsd_ref;
                                 }
-                                metricsHTML = buildMetricsHTML(metrics, numChains);
+                                metricsHTML = metrics.interface_confidence
+                                    ? confidenceTable(metrics.interface_confidence)
+                                    : `<td>—</td><td colspan="4">${buildMetricsHTML(metrics, numChains) || '—'}</td>`;
 
-                                const item = document.createElement('div');
+                                const tableBody = outputTableBody(resultsEl);
+                                const item = document.createElement('tr');
                                 item.className = 'result-item';
                                 item.dataset.method = result.method;
-                                item.innerHTML = `<span style="display:flex;align-items:center;"><input type="checkbox" checked onchange="toggleStructureVisibility('${result.method}', this.checked)"><span style="display:inline-block;width:12px;height:12px;background:${colorStr};border-radius:2px;margin-right:6px;"></span>${result.method}${metricsHTML}</span><span class="downloads">${downloads}</span>`;
+                                item.innerHTML = `<td class="model-cell"><input type="checkbox" aria-label="Show ${result.method} structure" checked onchange="toggleStructureVisibility('${result.method}', this.checked)"><span class="model-marker" style="background:${colorStr}"></span>${result.method}</td>${metricsHTML}<td><span class="downloads">${downloads}</span></td>`;
                                 // Insert alphabetically. Reference rows (label starts with "Reference") pin to the top.
                                 const isRef = result.method && result.method.startsWith('Reference');
-                                const existing = Array.from(resultsEl.querySelectorAll('.result-item[data-method]'));
+                                const existing = Array.from(tableBody.querySelectorAll('.result-item[data-method]'));
                                 let insertBefore = null;
                                 if (!isRef) {
                                     for (const el of existing) {
@@ -979,8 +970,8 @@
                                     // Reference: insert at top of the data-method block (after any non-data-method header rows)
                                     insertBefore = existing[0] || null;
                                 }
-                                if (insertBefore) resultsEl.insertBefore(item, insertBefore);
-                                else resultsEl.appendChild(item);
+                                if (insertBefore) tableBody.insertBefore(item, insertBefore);
+                                else tableBody.appendChild(item);
 
                                 // Load structure asynchronously (don't block on it)
                                 loadStructure(resultData.structure, result.format, result.method).catch(e =>
@@ -1018,12 +1009,17 @@
                             submitBtn.disabled = false;
                         }
                     } catch (pollError) {
-                        console.error('Poll error:', pollError);
+                        log(pollError.message, 'error');
+                        progressText.textContent = 'Connection lost';
+                        isDone = true;
+                        clearInterval(timerInterval);
+                        clearInterval(progressInterval);
+                        submitBtn.disabled = false;
                     }
                     if (!isDone) setTimeout(poll, getPollDelay());
                 }
                 setTimeout(poll, 500);  // First poll after 500ms
-            } catch (error) { log('Error: ' + error.message, 'error'); clearInterval(timerInterval); clearInterval(progressInterval); submitBtn.disabled = false; }
+            } catch (error) { log(error.message, 'error'); progressText.textContent = 'Request failed'; isDone = true; clearInterval(timerInterval); clearInterval(progressInterval); submitBtn.disabled = false; }
         });
     </script>
 </body>

@@ -26,6 +26,9 @@ out/
 # Modal
 .modal/
 
+# Tool state
+.antigravitycli/
+
 # OS
 .DS_Store
 Thumbs.db

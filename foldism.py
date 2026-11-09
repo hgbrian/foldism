@@ -1,6 +1,6 @@
 """Multi-algorithm protein folding web interface.
 
-Backends: Boltz-2, Chai-1, Protenix, AlphaFold 2, OpenFold 3, ESMFold 2.
+Backends: AlphaFold 2, ESMFold 2, OpenDDE, Mol-1.
 
     uv run modal run foldism.py   # run
     uv run modal deploy foldism.py   # deploy
@@ -24,15 +24,13 @@ from backends import (
     FOLDING_APPS,
     alphafold_predict,
     app,
-    boltz2_predict,
-    chai1_predict,
     colabsearch_fetch,
     convert_for_app,
     esmfold2_predict,
     get_cache_key,
     get_cache_subdir,
-    openfold3_predict,
-    protenix_predict,
+    opendde_predict,
+    mol1_predict,
 )
 from backends.common import job_store
 
@@ -64,6 +62,35 @@ web_image = _web_image.add_local_file(str(_overrides), "/app/overrides.json") if
 # =============================================================================
 
 
+CONFIDENCE_DOWNLOAD_DIRECTORY = Path("/cache/confidence-downloads")
+
+
+def _store_confidence_download(files: list[tuple[str, bytes]], directory: Path | None = None) -> tuple[str, int]:
+    """Keep optional arrays out of the Modal job-state value."""
+    from hashlib import sha256
+    from tempfile import NamedTemporaryFile
+
+    directory = directory or CONFIDENCE_DOWNLOAD_DIRECTORY
+    digest = sha256()
+    for name, content in sorted(files):
+        path = Path(name)
+        if path.is_absolute() or ".." in path.parts or not name.endswith("_confidence_arrays.npz"):
+            raise ValueError("Invalid confidence-array download name")
+        digest.update(name.encode())
+        digest.update(sha256(content).digest())
+    token = digest.hexdigest()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{token}.zip"
+    if not destination.exists():
+        with NamedTemporaryFile(dir=directory, suffix=".zip", delete=False) as temporary:
+            with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
+                for name, content in files:
+                    archive.writestr(name, content)
+        Path(temporary.name).replace(destination)
+        CACHE_VOLUME.commit()
+    return f"/confidence-arrays/{token}", destination.stat().st_size
+
+
 def _build_result_payload(
     structure_bytes: bytes, fmt: str, files: dict,
     original_cif_bytes: bytes | None = None,
@@ -87,9 +114,15 @@ def _build_result_payload(
         data_payload["rmsd_ref"] = rmsd_ref
     if "all_files" in files and files["all_files"]:
         zip_buffer = io.BytesIO()
+        arrays = [(name, content) for name, content in files["all_files"] if name.endswith("_confidence_arrays.npz")]
+        if arrays:
+            data_payload["confidence_arrays_url"], data_payload["confidence_arrays_bytes"] = _store_confidence_download(arrays)
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            if files.get("unified"):
+                zf.writestr("foldism_unified_scores.json", files["unified"])
             for name, content in files["all_files"]:
-                zf.writestr(name, content)
+                if not name.endswith("_confidence_arrays.npz"):
+                    zf.writestr(name, content)
         data_payload["zip"] = base64.b64encode(zip_buffer.getvalue()).decode("ascii")
     return data_payload
 
@@ -126,24 +159,7 @@ def _cif_to_pdb(cif_bytes: bytes) -> bytes:
         return out_pdb.read_bytes()
 
 
-def _parse_chai1_npz(npz_bytes: bytes) -> dict:
-    """Parse Chai-1 NPZ scores file and return JSON-serializable dict."""
-    import io
-
-    import numpy as np
-
-    data = np.load(io.BytesIO(npz_bytes))
-    scores = {}
-    for key in data.keys():
-        val = data[key]
-        if val.dtype == bool:
-            scores[key] = bool(val.item()) if val.size == 1 else val.tolist()
-        else:
-            scores[key] = val.tolist()
-    return scores
-
-
-def _normalize_scores(algo: str, raw: dict) -> bytes:
+def _normalize_scores(algo: str, raw: dict, use_msa: bool = False) -> bytes:
     """Convert algo-native scores dict to unified schema bytes.
 
     Unified keys: method, iptm, ptm, plddt, ranking_score, has_clash, raw.
@@ -152,31 +168,12 @@ def _normalize_scores(algo: str, raw: dict) -> bytes:
     def _first(v):
         return v[0] if isinstance(v, list) and v else v
 
-    if algo == "protenix":
+    if algo in {"opendde", "mol1"}:
         unified = {
             "iptm": raw.get("iptm"),
             "ptm": raw.get("ptm"),
             "plddt": raw.get("plddt"),
             "ranking_score": raw.get("ranking_score"),
-            "has_clash": bool(raw.get("has_clash", False)),
-        }
-    elif algo == "chai1":
-        unified = {
-            "iptm": _first(raw.get("iptm")),
-            "ptm": _first(raw.get("ptm")),
-            "plddt": None,
-            "ranking_score": _first(raw.get("aggregate_score")),
-            "has_clash": bool(raw.get("has_inter_chain_clashes", False)),
-        }
-    elif algo == "openfold3":
-        plddt = raw.get("avg_plddt", raw.get("plddt"))
-        if isinstance(plddt, list):
-            plddt = sum(plddt) / len(plddt) if plddt else None
-        unified = {
-            "iptm": raw.get("iptm"),
-            "ptm": raw.get("ptm"),
-            "plddt": plddt,
-            "ranking_score": raw.get("sample_ranking_score"),
             "has_clash": bool(raw.get("has_clash", False)),
         }
     elif algo == "esmfold2":
@@ -194,17 +191,6 @@ def _normalize_scores(algo: str, raw: dict) -> bytes:
             "plddt": plddt,
             "ranking_score": ranking_score,
             "has_clash": False,
-        }
-    elif algo == "boltz2":
-        plddt = raw.get("complex_plddt") or raw.get("plddt")
-        if isinstance(plddt, (int, float)) and 0 <= plddt <= 1:
-            plddt = plddt * 100
-        unified = {
-            "iptm": raw.get("iptm") or raw.get("complex_iptm"),
-            "ptm": raw.get("ptm") or raw.get("complex_ptm"),
-            "plddt": plddt,
-            "ranking_score": raw.get("confidence_score"),
-            "has_clash": bool(raw.get("has_clashes", False)),
         }
     elif algo == "alphafold2":
         if "ptm" in raw or "iptm" in raw:
@@ -233,6 +219,12 @@ def _normalize_scores(algo: str, raw: dict) -> bytes:
     else:
         unified = {}
 
+    from backends.confidence import annotate_percentiles
+
+    confidence = raw.get("interface_confidence")
+    unified["interface_confidence"] = (
+        annotate_percentiles(algo, confidence, use_msa=use_msa) if confidence else None
+    )
     unified["method"] = algo
     unified["raw"] = raw
     return json.dumps(unified, indent=2).encode()
@@ -242,37 +234,7 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
     """Find best model index for given algorithm based on confidence scores."""
     files = {str(path): content for path, content in outputs}
 
-    if algo == "chai1":
-        best_idx, best_score = 0, -float("inf")
-        for i in range(5):
-            score_file = f"scores.model_idx_{i}.npz"
-            if score_file in files:
-                scores = _parse_chai1_npz(files[score_file])
-                score = scores.get("aggregate_score", [0])[0]
-                if score > best_score:
-                    best_score, best_idx = score, i
-        return best_idx
-
-    elif algo == "boltz2":
-        best_idx, best_score = 0, -float("inf")
-        for path, content in outputs:
-            path_str = str(path)
-            if (
-                "confidence_" in path_str
-                and "_model_" in path_str
-                and path_str.endswith(".json")
-            ):
-                try:
-                    scores = json.loads(content)
-                    score = scores.get("confidence_score", 0)
-                    idx = int(path_str.split("_model_")[1].split(".")[0])
-                    if score > best_score:
-                        best_score, best_idx = score, idx
-                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
-                    pass
-        return best_idx
-
-    elif algo == "protenix":
+    if algo in {"opendde", "mol1"}:
         best_idx, best_score = 0, -float("inf")
         for path, content in outputs:
             path_str = str(path)
@@ -283,23 +245,6 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
                     idx = int(
                         path_str.split("summary_confidence_sample_")[1].split(".")[0]
                     )
-                    if score > best_score:
-                        best_score, best_idx = score, idx
-                except (KeyError, ValueError, IndexError, json.JSONDecodeError):
-                    pass
-        return best_idx
-
-    elif algo == "openfold3":
-        best_idx, best_score = 0, -float("inf")
-        for path, content in outputs:
-            path_str = str(path)
-            if "_confidences_aggregated.json" in path_str:
-                try:
-                    scores = json.loads(content)
-                    score = scores.get("avg_plddt", scores.get("plddt", 0))
-                    if isinstance(score, list):
-                        score = sum(score) / len(score) if score else 0
-                    idx = int(path_str.split("_sample_")[1].split("_")[0])
                     if score > best_score:
                         best_score, best_idx = score, idx
                 except (KeyError, ValueError, IndexError, json.JSONDecodeError):
@@ -324,7 +269,7 @@ def _find_best_model_index(algo: str, outputs: list[tuple]) -> int:
     return 0
 
 
-def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
+def _select_best_model(algo: str, outputs: list[tuple], use_msa: bool = False) -> dict[str, bytes]:
     if not outputs:
         raise ValueError(f"{algo}: No output files")
 
@@ -332,29 +277,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
     result = {}
     raw_scores: dict | None = None
 
-    if algo == "chai1":
-        best_idx = _find_best_model_index(algo, outputs)
-        cif_key = f"pred.model_idx_{best_idx}.cif"
-        if cif_key in files:
-            result["structure.cif"] = files[cif_key]
-        npz_key = f"scores.model_idx_{best_idx}.npz"
-        if npz_key in files:
-            raw_scores = _parse_chai1_npz(files[npz_key])
-            result["scores.json"] = json.dumps(raw_scores).encode()
-
-    elif algo == "boltz2":
-        best_idx = _find_best_model_index(algo, outputs)
-        for path, content in outputs:
-            path_str = str(path)
-            if f"_model_{best_idx}.cif" in path_str or path_str.endswith(
-                f"model_{best_idx}.cif"
-            ):
-                result["structure.cif"] = content
-            elif f"confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
-                result["scores.json"] = content
-                raw_scores = json.loads(content)
-
-    elif algo == "protenix":
+    if algo in {"opendde", "mol1"}:
         best_idx = _find_best_model_index(algo, outputs)
         for path, content in outputs:
             path_str = str(path)
@@ -371,21 +294,10 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 continue
             if "ranked_0.pdb" in path_str or ("rank_001" in path_str and path_str.endswith(".pdb")):
                 result["structure.cif"] = _pdb_to_cif(content)
-            elif "ranking_debug.json" in path_str:
+            elif "ranking_debug.json" in path_str and raw_scores is None:
                 result["scores.json"] = content
                 raw_scores = json.loads(content)
             elif "_scores_rank_001" in path_str and path_str.endswith(".json"):
-                if raw_scores is None:
-                    result["scores.json"] = content
-                    raw_scores = json.loads(content)
-
-    elif algo == "openfold3":
-        best_idx = _find_best_model_index(algo, outputs)
-        for path, content in outputs:
-            path_str = str(path)
-            if f"_sample_{best_idx}_model.cif" in path_str:
-                result["structure.cif"] = content
-            elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
                 result["scores.json"] = content
                 raw_scores = json.loads(content)
 
@@ -400,7 +312,7 @@ def _select_best_model(algo: str, outputs: list[tuple]) -> dict[str, bytes]:
                 raw_scores = json.loads(content)
 
     if raw_scores is not None:
-        result["unified.json"] = _normalize_scores(algo, raw_scores)
+        result["unified.json"] = _normalize_scores(algo, raw_scores, use_msa=use_msa)
 
     return result
 
@@ -429,6 +341,7 @@ def _fetch_msas(protein_seqs: list[str]) -> dict:
 def _build_method_params(
     method: str, converted_input: str, use_msa: bool, input_name: str | None = None,
     msa_result: dict | None = None, original_fasta: str | None = None,
+    calculate_actifptm: bool = True, download_confidence_data: bool = True,
 ) -> dict[str, Any]:
     """Build params dict for a method (centralized to avoid duplication)."""
     # Extract hash from converted input for naming
@@ -438,26 +351,7 @@ def _build_method_params(
         match = re.search(r"[a-f0-9]{6}", first_line)
         input_name = match.group(0) if match else "input"
 
-    if method == "boltz2":
-        # Boltz always uses MSA internally; `use_msa` here tracks the SOURCE
-        # (True = pre-fetched ColabSearch, False = boltz's built-in server)
-        # so the cache key separates the two.
-        params = {"input_str": converted_input, "use_msa": use_msa}
-        if msa_result and use_msa:
-            params["msa_result"] = msa_result
-            if original_fasta:
-                params["original_fasta"] = original_fasta
-        return params
-    elif method == "chai1":
-        params = {
-            "input_str": converted_input,
-            "input_name": f"{input_name}.faa",
-            "use_msa_server": use_msa,
-        }
-        if msa_result and use_msa:
-            params["msa_result"] = msa_result
-        return params
-    elif method == "protenix":
+    if method in {"opendde", "mol1"}:
         params = {
             "input_str": converted_input,
             "input_name": input_name,
@@ -465,6 +359,8 @@ def _build_method_params(
         }
         if msa_result and use_msa:
             params["msa_result"] = msa_result
+        params["calculate_actifptm"] = calculate_actifptm
+        params["download_confidence_data"] = download_confidence_data
         return params
     elif method == "alphafold2":
         params: dict[str, Any] = {
@@ -479,15 +375,8 @@ def _build_method_params(
             # multi-record FASTA so it can recover the chain list with duplicates.
             if original_fasta:
                 params["original_fasta"] = original_fasta
-        return params
-    elif method == "openfold3":
-        params = {
-            "input_str": converted_input,
-            "input_name": input_name,
-            "use_msa": use_msa,
-        }
-        if msa_result and use_msa:
-            params["msa_result"] = msa_result
+        params["calculate_actifptm"] = calculate_actifptm
+        params["download_confidence_data"] = download_confidence_data
         return params
     elif method == "esmfold2":
         params = {
@@ -497,6 +386,8 @@ def _build_method_params(
         }
         if msa_result and use_msa:
             params["msa_result"] = msa_result
+        params["calculate_actifptm"] = calculate_actifptm
+        params["download_confidence_data"] = download_confidence_data
         return params
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -507,30 +398,25 @@ def run_algorithm(
     algo: str, fasta_str: str, run_name: str, use_msa: bool = True,
     msa_result: dict | None = None,
     overwrite: bool = False,
+    calculate_actifptm: bool = True, download_confidence_data: bool = True,
 ) -> tuple[dict[str, bytes], list[tuple]]:
     """Run a folding algorithm and return (best_files, all_outputs).
 
     Runs on Modal with web_image so numpy/pyyaml are available.
     """
     converted = convert_for_app(fasta_str, algo)
-    params = _build_method_params(algo, converted, use_msa, run_name, msa_result=msa_result, original_fasta=fasta_str)
+    params = _build_method_params(algo, converted, use_msa, run_name, msa_result=msa_result, original_fasta=fasta_str, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
 
-    if algo == "boltz2":
-        outputs = boltz2_predict.remote(params=params, overwrite=overwrite)
-    elif algo == "chai1":
-        outputs = chai1_predict.remote(params=params, overwrite=overwrite)
-    elif algo == "protenix":
-        outputs = protenix_predict.remote(params=params, overwrite=overwrite)
+    if algo in {"opendde", "mol1"}:
+        outputs = {"opendde": opendde_predict, "mol1": mol1_predict}[algo].remote(params=params, overwrite=overwrite)
     elif algo == "alphafold2":
         outputs = alphafold_predict.remote(params=params, overwrite=overwrite)
-    elif algo == "openfold3":
-        outputs = openfold3_predict.remote(params=params, overwrite=overwrite)
     elif algo == "esmfold2":
         outputs = esmfold2_predict.remote(params=params, overwrite=overwrite)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
-    best = _select_best_model(algo, outputs)
+    best = _select_best_model(algo, outputs, use_msa=use_msa)
     # Convert Path objects to strings for serialization
     all_outputs = [(str(path), content) for path, content in outputs]
     return best, all_outputs
@@ -541,12 +427,12 @@ def run_algorithm(
 # =============================================================================
 
 
-MSA_BACKENDS = ("boltz2", "protenix", "chai1", "alphafold2", "openfold3", "esmfold2")
+MSA_BACKENDS = ("opendde", "mol1", "alphafold2", "esmfold2")
 
 
 def _resolve_algorithms(algorithms: str | None) -> list[str]:
     if algorithms is None:
-        return list(FOLDING_APPS.keys())
+        return ["esmfold2", "opendde", "mol1"]
     algos = [a.strip() for a in algorithms.split(",")]
     for algo in algos:
         if algo not in FOLDING_APPS:
@@ -563,6 +449,7 @@ def main(
     out_dir: str = "./out",
     keep_all: bool = True,
     use_msa: bool = True,
+    calculate_actifptm: bool = True, download_confidence_data: bool = True,
     overwrite: bool = False,
     pattern: str = "*.faa",
 ):
@@ -572,7 +459,7 @@ def main(
         modal run foldism.py --input-faa lys.faa --algorithms esmfold2
 
     Directory:
-        modal run foldism.py --input-dir /tmp/fastas --algorithms protenix
+        modal run foldism.py --input-dir /tmp/fastas --algorithms opendde
     """
     if bool(input_faa) == bool(input_dir):
         raise ValueError("Pass exactly one of --input-faa or --input-dir")
@@ -580,7 +467,7 @@ def main(
     algos_to_run = _resolve_algorithms(algorithms)
 
     if input_dir:
-        _run_batch(input_dir, algos_to_run, out_dir, pattern, use_msa, overwrite, keep_all)
+        _run_batch(input_dir, algos_to_run, out_dir, pattern, use_msa, overwrite, keep_all, calculate_actifptm, download_confidence_data)
         return
 
     with open(input_faa) as f:
@@ -593,18 +480,12 @@ def main(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     msa_result = None
-    if not use_msa and "boltz2" in algos_to_run:
-        print("Note: dropping Boltz-2 from this run (Boltz only runs with MSA).")
-        algos_to_run = [a for a in algos_to_run if a != "boltz2"]
     msa_backends = [a for a in algos_to_run if a in MSA_BACKENDS]
     if not use_msa and msa_backends:
         print()
         print("=" * 70)
         print("WARNING: --no-use-msa selected. Per-backend behavior:")
         print("  - AlphaFold 2:   single_sequence mode — accuracy drops a lot")
-        print("  - Protenix:      no MSA           — accuracy drops a lot")
-        print("  - OpenFold 3:    no MSA           — accuracy drops a lot")
-        print("  - Chai-1:        no MSA, ESM2 embeddings only — moderate quality")
         print("  - ESMFold 2:     no MSA, ESMC embeddings only — its intended fast mode")
         print("=" * 70)
         print()
@@ -619,7 +500,7 @@ def main(
     handles = []
     for algo in algos_to_run:
         print(f"  Spawning {FOLDING_APPS[algo].name}...")
-        handle = run_algorithm.spawn(algo, input_str, run_name, use_msa=use_msa, msa_result=msa_result, overwrite=overwrite)
+        handle = run_algorithm.spawn(algo, input_str, run_name, use_msa=use_msa, msa_result=msa_result, overwrite=overwrite, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
         handles.append((algo, handle))
 
     for algo, handle in handles:
@@ -650,18 +531,10 @@ def main(
 
 def _run_batch(
     input_dir: str, algos_to_run: list[str], out_dir: str, pattern: str,
-    use_msa: bool, overwrite: bool, keep_all: bool,
+    use_msa: bool, overwrite: bool, keep_all: bool, calculate_actifptm: bool = True, download_confidence_data: bool = True,
 ):
     """Run folding on a directory of FASTA files using .map() for parallelism."""
     import glob
-
-    # Boltz only runs with MSA; drop it under --no-use-msa for consistency with main().
-    if not use_msa and "boltz2" in algos_to_run:
-        print("Note: dropping Boltz-2 from this batch (Boltz only runs with MSA).")
-        algos_to_run = [a for a in algos_to_run if a != "boltz2"]
-        if not algos_to_run:
-            print("No algorithms left to run.")
-            return
 
     files = sorted(glob.glob(f"{input_dir}/{pattern}"))
     if not files:
@@ -703,7 +576,7 @@ def _run_batch(
                 algo, f,
                 run_algorithm.spawn(
                     algo, open(f).read(), Path(f).stem,
-                    use_msa=use_msa, msa_result=file_msa[f], overwrite=overwrite,
+                    use_msa=use_msa, msa_result=file_msa[f], overwrite=overwrite, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data,
                 ),
             ))
 
@@ -797,7 +670,7 @@ def _superpose_structures(
                 # Order: arg1 = prediction (gets transformed onto), arg2 = reference.
                 # -mm 1 -ter 1: align the WHOLE complex (all chains, fixed order)
                 #   rather than USalign's default first-chain-only behavior, so
-                #   multimers (e.g. antibody + antigen) superpose on the full assembly
+                #   multimers (e.g. binder + target) superpose on the full assembly
                 #   instead of anchoring on one short chain. Degenerates to normal
                 #   single-chain alignment for monomers.
                 # -o <prefix>: writes the transformed prediction as full all-atom
@@ -958,6 +831,11 @@ def _check_cache_inline(method: str, params: dict) -> list | None:
         print(f"[cache-check] {method} MISS: {cache_key}")
         return None
 
+    if method in {"esmfold2", "opendde", "mol1", "alphafold2"}:
+        from backends.confidence import cache_supports
+        if not cache_supports(cache_path, bool(params.get("calculate_actifptm", True)), bool(params.get("download_confidence_data", True))):
+            return None
+
     print(f"[cache-check] {method} HIT: {cache_key}")
     CACHE_VOLUME.reload()
 
@@ -968,10 +846,10 @@ def _check_cache_inline(method: str, params: dict) -> list | None:
     ]
 
 
-def _check_cache(method: str, fasta_str: str, use_msa: bool) -> list | None:
+def _check_cache(method: str, fasta_str: str, use_msa: bool, calculate_actifptm: bool = True, download_confidence_data: bool = True) -> list | None:
     """Check cache for method, converting input and building params."""
     converted = convert_for_app(fasta_str, method)
-    params = _build_method_params(method, converted, use_msa)
+    params = _build_method_params(method, converted, use_msa, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
     return _check_cache_inline(method, params)
 
 
@@ -979,27 +857,22 @@ def _check_cache(method: str, fasta_str: str, use_msa: bool) -> list | None:
 def fold_structure_web(
     fasta_str: str, method: str, use_msa: bool = True, job_id: str | None = None,
     msa_result: dict | None = None,
+    calculate_actifptm: bool = True, download_confidence_data: bool = True,
 ) -> tuple[str, dict | None, str | None]:
     """Run a single folding method for web interface."""
     try:
         converted = convert_for_app(fasta_str, method)
-        params = _build_method_params(method, converted, use_msa, msa_result=msa_result, original_fasta=fasta_str)
+        params = _build_method_params(method, converted, use_msa, msa_result=msa_result, original_fasta=fasta_str, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
 
         # Check cache first - avoids spawning GPU container if cached
         cached = _check_cache_inline(method, params)
         if cached is not None:
             print(f"[{method}] Returning cached result ({len(cached)} files)")
             outputs = [(Path(f), c) for f, c in cached]
-        elif method == "boltz2":
-            outputs = boltz2_predict.remote(params=params, job_id=job_id)
-        elif method == "chai1":
-            outputs = chai1_predict.remote(params=params, job_id=job_id)
-        elif method == "protenix":
-            outputs = protenix_predict.remote(params=params, job_id=job_id)
+        elif method in {"opendde", "mol1"}:
+            outputs = {"opendde": opendde_predict, "mol1": mol1_predict}[method].remote(params=params, job_id=job_id)
         elif method == "alphafold2":
             outputs = alphafold_predict.remote(params=params, job_id=job_id)
-        elif method == "openfold3":
-            outputs = openfold3_predict.remote(params=params, job_id=job_id)
         elif method == "esmfold2":
             outputs = esmfold2_predict.remote(params=params, job_id=job_id)
         else:
@@ -1008,7 +881,7 @@ def fold_structure_web(
         print(f"[{method}] Got {len(outputs)} output files")
 
         # Use shared result processing logic
-        files = _process_outputs_to_files(method, outputs)
+        files = _process_outputs_to_files(method, outputs, use_msa=use_msa)
         if not files or "structure" not in files:
             return (method, None, f"No structure in {len(outputs)} files")
 
@@ -1022,7 +895,7 @@ def fold_structure_web(
         return (method, None, str(e))
 
 
-def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
+def _process_outputs_to_files(method: str, outputs: list, use_msa: bool = False) -> dict | None:
     """Process raw outputs into files dict with structure and scores."""
     import zipfile
     from io import BytesIO
@@ -1031,29 +904,7 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
     outputs_dict = {str(f): c for f, c in outputs}
     raw_scores: dict | None = None
 
-    if method == "boltz2":
-        best_idx = _find_best_model_index(method, outputs)
-        for path, content in outputs:
-            path_str = str(path)
-            if f"_model_{best_idx}.cif" in path_str or path_str.endswith(
-                f"model_{best_idx}.cif"
-            ):
-                files["structure"] = (content, "cif")
-            elif "confidence_" in path_str and f"_model_{best_idx}.json" in path_str:
-                files["scores"] = content
-                raw_scores = json.loads(content)
-
-    elif method == "chai1":
-        best_idx = _find_best_model_index(method, outputs)
-        cif_key = f"pred.model_idx_{best_idx}.cif"
-        if cif_key in outputs_dict:
-            files["structure"] = (outputs_dict[cif_key], "cif")
-        npz_key = f"scores.model_idx_{best_idx}.npz"
-        if npz_key in outputs_dict:
-            raw_scores = _parse_chai1_npz(outputs_dict[npz_key])
-            files["scores"] = json.dumps(raw_scores).encode()
-
-    elif method == "protenix":
+    if method in {"opendde", "mol1"}:
         best_idx = _find_best_model_index(method, outputs)
         for path, content in outputs:
             path_str = str(path)
@@ -1071,21 +922,10 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
             if "ranked_0.pdb" in path_str or ("rank_001" in path_str and path_str.endswith(".pdb")):
                 files["structure"] = (_pdb_to_cif(content), "cif")
                 print(f"[alphafold2] Found structure: {path_str}")
-            elif "ranking_debug.json" in path_str:
+            elif "ranking_debug.json" in path_str and raw_scores is None:
                 files["scores"] = content
                 raw_scores = json.loads(content)
             elif "_scores_rank_001" in path_str and path_str.endswith(".json"):
-                if raw_scores is None:
-                    files["scores"] = content
-                    raw_scores = json.loads(content)
-
-    elif method == "openfold3":
-        best_idx = _find_best_model_index(method, outputs)
-        for path, content in outputs:
-            path_str = str(path)
-            if f"_sample_{best_idx}_model.cif" in path_str:
-                files["structure"] = (content, "cif")
-            elif f"_sample_{best_idx}_confidences_aggregated.json" in path_str:
                 files["scores"] = content
                 raw_scores = json.loads(content)
 
@@ -1100,7 +940,11 @@ def _process_outputs_to_files(method: str, outputs: list) -> dict | None:
                 raw_scores = json.loads(content)
 
     if raw_scores is not None:
-        files["unified"] = _normalize_scores(method, raw_scores)
+        files["unified"] = _normalize_scores(method, raw_scores, use_msa=use_msa)
+        confidence = json.loads(files["unified"])["interface_confidence"]
+        if confidence is not None:
+            raw_scores = {**raw_scores, "interface_confidence": confidence}
+            files["scores"] = json.dumps(raw_scores, indent=2).encode()
 
     if "structure" not in files:
         return None
@@ -1117,6 +961,7 @@ def run_folding_job(
     use_msa: bool,
     reference_pdb_id: str | None = None,
     reference_pdb_bytes: bytes | None = None,
+    calculate_actifptm: bool = True, download_confidence_data: bool = True,
 ):
     """Background orchestrator for folding jobs (avoids 10-min SSE timeout)."""
     import time
@@ -1128,7 +973,7 @@ def run_folding_job(
         results: list[dict] | None = None,
         done: bool = False,
     ):
-        # Merge with existing state to preserve backend logs (boltz_logs, chai1_logs, etc.)
+        # Merge with existing state to preserve backend logs (opendde_logs, esmfold2_logs, etc.)
         state = job_store.get(job_id, {})
         state["progress"] = progress
         state["status"] = status
@@ -1142,15 +987,8 @@ def run_folding_job(
             state["results"] = existing_results
         job_store[job_id] = state
 
-    # Defense in depth: UI already prevents this, but if a client submits
-    # boltz2 with use_msa=false, drop it (Boltz only runs with MSA).
-    if not use_msa and "boltz2" in methods:
-        methods = [m for m in methods if m != "boltz2"]
-        logs0 = [{"msg": "Boltz-2 skipped (requires MSA; --no-use-msa was set)", "cls": "warning"}]
-    else:
-        logs0 = []
     total = len(methods)
-    logs = logs0 + [{"msg": "Checking cache...", "cls": "info"}]
+    logs = [{"msg": "Checking cache...", "cls": "info"}]
     update_job(5, f"Starting {total} methods...", logs)
 
     # Check result cache for each method FIRST so fully-cached jobs skip
@@ -1158,7 +996,7 @@ def run_folding_job(
     cached_results = {}
     methods_to_run = []
     for method in methods:
-        cached = _check_cache_inline_for_job(method, fasta, use_msa)
+        cached = _check_cache_inline_for_job(method, fasta, use_msa, calculate_actifptm, download_confidence_data)
         if cached is not None:
             cached_results[method] = [(Path(f), c) for f, c in cached]
             logs.append(
@@ -1183,11 +1021,7 @@ def run_folding_job(
             update_job(8, f"Starting {total} methods...", logs)
 
     for method in methods_to_run:
-        # Boltz always uses MSA, others respect checkbox
-        if method == "boltz2":
-            msa_note = " (with MSA)"
-        else:
-            msa_note = " (with MSA)" if use_msa else ""
+        msa_note = " (with MSA)" if use_msa else ""
         logs.append(
             {
                 "msg": f"Running {FOLDING_APPS[method].name}{msa_note}",
@@ -1200,7 +1034,7 @@ def run_folding_job(
     # Spawn only methods that need computation
     handles = []
     for method in methods_to_run:
-        handle = fold_structure_web.spawn(fasta, method, use_msa, job_id, msa_result=msa_result)
+        handle = fold_structure_web.spawn(fasta, method, use_msa, job_id, msa_result=msa_result, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
         handles.append((method, handle))
 
     all_results = {}
@@ -1249,7 +1083,7 @@ def run_folding_job(
     for method, outputs in cached_results.items():
         logs.append({"msg": f"{FOLDING_APPS[method].name}: processing cached files ({len(outputs)})", "cls": "dim"})
         update_job(int(10 + (len(all_results) / total) * 70), f"Processing {FOLDING_APPS[method].name}...", logs)
-        files = _process_outputs_to_files(method, outputs)
+        files = _process_outputs_to_files(method, outputs, use_msa=use_msa)
         if not files or "structure" not in files:
             paths_preview = ", ".join(str(p) for p, _ in outputs[:8])
             logs.append({
@@ -1467,12 +1301,10 @@ def run_folding_job(
         try:
             state = job_store.get(job_id, {})
             log_configs = [
-                ("boltz2", "boltz_logs", "Boltz"),
-                ("chai1", "chai1_logs", "Chai-1"),
-                ("protenix", "protenix_logs", "Protenix"),
                 ("alphafold2", "alphafold2_logs", "AlphaFold2"),
-                ("openfold3", "openfold3_logs", "OpenFold3"),
                 ("esmfold2", "esmfold2_logs", "ESMFold2"),
+                ("opendde", "opendde_logs", "OpenDDE"),
+                ("mol1", "mol1_logs", "Mol-1"),
             ]
 
             for method_key, log_key, display_name in log_configs:
@@ -1543,10 +1375,10 @@ def run_folding_job(
 
 
 def _check_cache_inline_for_job(
-    method: str, fasta_str: str, use_msa: bool
+    method: str, fasta_str: str, use_msa: bool, calculate_actifptm: bool = True, download_confidence_data: bool = True
 ) -> list | None:
     """Check cache inline for job orchestrator."""
-    return _check_cache(method, fasta_str, use_msa)
+    return _check_cache(method, fasta_str, use_msa, calculate_actifptm, download_confidence_data)
 
 
 @app.function(image=web_image, timeout=60 * 60, volumes={"/cache": CACHE_VOLUME})
@@ -1588,14 +1420,25 @@ def web():
         return data
 
     def check_cache_in_server(
-        method: str, fasta_str: str, use_msa: bool
+        method: str, fasta_str: str, use_msa: bool, calculate_actifptm: bool = True, download_confidence_data: bool = True
     ) -> list | None:
         """Check cache directly in the web server - no container spawn needed."""
-        return _check_cache(method, fasta_str, use_msa)
+        return _check_cache(method, fasta_str, use_msa, calculate_actifptm, download_confidence_data)
 
     @flask_app.route("/", methods=["GET"])
     def home():
         return Path("/app/index.html").read_text()
+
+    @flask_app.route("/confidence-arrays/<token>", methods=["GET"])
+    def confidence_arrays(token):
+        if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            abort(404)
+        CACHE_VOLUME.reload()
+        path = CONFIDENCE_DOWNLOAD_DIRECTORY / f"{token}.zip"
+        if not path.is_file():
+            abort(404)
+        return send_file(path, mimetype="application/zip", as_attachment=True,
+                         download_name="confidence_arrays.zip")
 
     @flask_app.route("/overrides.json", methods=["GET"])
     def overrides():
@@ -1614,6 +1457,8 @@ def web():
         fasta = request.form.get("fasta", "").strip()
         methods = request.form.getlist("method")
         use_msa = request.form.get("use_msa", "true").lower() == "true"
+        calculate_actifptm = True
+        download_confidence_data = request.form.get("download_confidence_data", "true").lower() == "true"
         reference_pdb_id = (request.form.get("reference_pdb_id") or "").strip() or None
         reference_file = request.files.get("reference_file")
         reference_pdb_bytes = reference_file.read() if reference_file and reference_file.filename else None
@@ -1622,7 +1467,7 @@ def web():
             return jsonify({"error": "No sequence"}), 400
 
         if not methods:
-            methods = ["boltz2"]
+            methods = ["esmfold2"]
 
         job_id = str(uuid.uuid4())[:12]
         job_store[job_id] = {"progress": 0, "status": "Starting...", "done": False}
@@ -1632,6 +1477,7 @@ def web():
             job_id, fasta, methods, use_msa,
             reference_pdb_id=reference_pdb_id,
             reference_pdb_bytes=reference_pdb_bytes,
+            calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data,
         )
 
         return jsonify({"job_id": job_id})
@@ -1652,6 +1498,8 @@ def web():
         fasta = request.form.get("fasta", "").strip()
         methods = request.form.getlist("method")
         use_msa = request.form.get("use_msa", "true").lower() == "true"
+        calculate_actifptm = True
+        download_confidence_data = request.form.get("download_confidence_data", "true").lower() == "true"
 
         if not fasta:
             return Response(
@@ -1660,11 +1508,7 @@ def web():
             )
 
         if not methods:
-            methods = ["boltz2"]
-
-        # Boltz only runs with MSA; drop it under --no-use-msa (mirrors main /fold).
-        if not use_msa and "boltz2" in methods:
-            methods = [m for m in methods if m != "boltz2"]
+            methods = ["esmfold2"]
 
         def generate():
             import time
@@ -1677,7 +1521,7 @@ def web():
             cached_results = {}
             methods_to_run = []
             for method in methods:
-                cached = check_cache_in_server(method, fasta, use_msa)
+                cached = check_cache_in_server(method, fasta, use_msa, calculate_actifptm, download_confidence_data)
                 if cached is not None:
                     cached_results[method] = [(Path(f), c) for f, c in cached]
                     yield f"data: {json.dumps({'log': f'{FOLDING_APPS[method].name}: cached', 'log_class': 'success'})}\n\n"
@@ -1700,7 +1544,7 @@ def web():
             # Spawn only methods that need computation
             handles = []
             for method in methods_to_run:
-                handle = fold_structure_web.spawn(fasta, method, use_msa, msa_result=msa_result)
+                handle = fold_structure_web.spawn(fasta, method, use_msa, msa_result=msa_result, calculate_actifptm=calculate_actifptm, download_confidence_data=download_confidence_data)
                 handles.append((method, handle))
                 yield f"data: {json.dumps({'log': f'Running {FOLDING_APPS[method].name}', 'log_class': 'dim', 'method_key': method})}\n\n"
 
@@ -1709,7 +1553,7 @@ def web():
 
             # Process cached results immediately
             for method, outputs in cached_results.items():
-                files = _process_outputs_to_files(method, outputs)
+                files = _process_outputs_to_files(method, outputs, use_msa=use_msa)
                 if files and "structure" in files:
                     all_results[method] = (files, None)
                     structure_bytes, fmt = files["structure"]
