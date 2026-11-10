@@ -234,7 +234,13 @@ def alphafold_cache_key(params: dict[str, Any]) -> str:
 
 def esmfold2_cache_key(params: dict[str, Any]) -> str:
     """Generate cache key for ESMFold2 predictions."""
-    from .esmfold2 import ESMC_HF_REPO, ESMC_HF_REVISION, ESMFOLD2_HF_REPO, ESMFOLD2_HF_REVISION
+    from .esmfold2 import (
+        ESMC_HF_REPO,
+        ESMC_HF_REVISION,
+        ESMFOLD2_HF_REPO,
+        ESMFOLD2_HF_REVISION,
+        ESMFOLD2_RUNTIME,
+    )
     input_hash = sha256(params.get("input_str", "").encode()).hexdigest()
     cache_params = {
         "version": CACHE_VERSION,
@@ -247,6 +253,7 @@ def esmfold2_cache_key(params: dict[str, Any]) -> str:
         "num_loops": params.get("num_loops", 3),
         "use_msa": params.get("use_msa", True),
         "model": "esmfold2",
+        "runtime": ESMFOLD2_RUNTIME,
         "checkpoint": f"{ESMFOLD2_HF_REPO}@{ESMFOLD2_HF_REVISION}",
         "encoder_checkpoint": f"{ESMC_HF_REPO}@{ESMC_HF_REVISION}",
         # Bumped when scores.json schema grows (added ptm/iptm/chain_pair_iptm).

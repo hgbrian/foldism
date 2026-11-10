@@ -424,6 +424,17 @@ def install_native(module, model: str) -> None:
                     namespace[key] = wrapped
 
 
+# The `esm` package added inference settings after the first pinned commit. Its new defaults
+# (LM dropout 0.3, MSA depth cap 1024, MSA column masking 0.1) change results. The first pin
+# used the checkpoint's own LM dropout and no MSA depth cap or column masking. These options
+# restore that behavior.
+LEGACY_FOLD_OPTIONS = {
+    "lm_dropout": None,
+    "msa_max_depth": None,
+    "msa_column_mask_rate": 0.0,
+}
+
+
 def esm_fold(model, prediction_input, **options):
     """Capture exact ESMFold2 token order and optional confidence distributions."""
     # ESM SDK is installed only inside its Modal image.
@@ -434,6 +445,7 @@ def esm_fold(model, prediction_input, **options):
     captured = []
     enabled = options.pop("calculate_actifptm", True)
     retain = options.pop("download_confidence_data", True)
+    options = {**LEGACY_FOLD_OPTIONS, **options}
 
     def capture(module, args, kwargs, output):
         bound = inspect.signature(module.forward).bind(*args, **kwargs)

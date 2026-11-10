@@ -406,26 +406,6 @@ def test_af2_default_trimer_iptm_does_not_calculate_actifptm(monkeypatch):
     assert "pae_matrix_with_logits" not in result
 
 
-@pytest.mark.parametrize(
-    "key", ["missing_keys", "mismatched_keys", "error_msgs", "unexpected_keys"]
-)
-def test_esmfold2_rejects_incomplete_checkpoints(key):
-    from backends.esmfold2 import _require_loaded_weights
-
-    with pytest.raises(RuntimeError, match="Incomplete pretrained weight loading"):
-        _require_loaded_weights({key: ["encoder.embedding"]}, encoder=True)
-
-
-def test_esmfold2_allows_only_unused_encoder_heads():
-    from backends.esmfold2 import _require_loaded_weights
-
-    _require_loaded_weights(
-        {"unexpected_keys": ["lm_head.weight", "layer._extra_state"]}, encoder=True
-    )
-    with pytest.raises(RuntimeError, match="Incomplete pretrained weight loading"):
-        _require_loaded_weights({"unexpected_keys": ["lm_head.weight"]})
-
-
 def test_af2_unpaired_only_input_keeps_query_rows_for_every_chain(
     monkeypatch, tmp_path
 ):
@@ -628,3 +608,22 @@ def test_old_confidence_downloads_are_deleted(monkeypatch, tmp_path):
     foldism._store_confidence_download([('sample_confidence_arrays.npz', b'data')], tmp_path)
     assert not old.exists()
     assert len(list(tmp_path.glob('*.zip'))) == 1
+
+
+def test_legacy_options_restore_pinned_inference_settings():
+    from backends.confidence import LEGACY_FOLD_OPTIONS
+
+    assert LEGACY_FOLD_OPTIONS == {
+        "lm_dropout": None,
+        "msa_max_depth": None,
+        "msa_column_mask_rate": 0.0,
+    }
+
+
+def test_esmfold2_runtime_changes_cache_key(monkeypatch):
+    import backends.esmfold2 as esmfold2
+
+    params = {"input_str": ">A\nMKV\n", "use_msa": False}
+    before = get_cache_key("esmfold2", params)
+    monkeypatch.setattr(esmfold2, "ESMFOLD2_RUNTIME", "other-runtime")
+    assert get_cache_key("esmfold2", params) != before

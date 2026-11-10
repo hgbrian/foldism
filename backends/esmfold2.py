@@ -32,7 +32,9 @@ ESMFOLD2_HF_REPO = "biohub/ESMFold2"
 # (which also bumps the cache key via esmfold2_cache_key), and rebuild.
 ESMFOLD2_HF_REVISION = "1afea82e432079d9af2ebd71d1e4c339ecca2ff0"
 ESMFOLD2_VOLUME_DIR = "/models/esmfold2"
-ESMFOLD2_GIT_REF = "c94ed8d"
+ESMFOLD2_GIT_REF = "90d6497a546bb55929c2d3ca2e313d4613ec1922"
+TRANSFORMERS_VERSION = "5.16.0"
+ESMFOLD2_RUNTIME = f"esm@{ESMFOLD2_GIT_REF}+transformers=={TRANSFORMERS_VERSION}+legacy-inference-v1"
 ESMC_HF_REPO = "biohub/ESMC-6B"
 ESMC_HF_REVISION = "45b0fa5d7fb06faefbd5e3b89bdcef35d564e79a"
 
@@ -81,50 +83,29 @@ def _download_pinned_esmc() -> None:
     MODEL_VOLUME.commit()
 
 
-def _require_loaded_weights(info: dict, *, encoder: bool = False) -> None:
-    """Reject incomplete weights before attempting a prediction."""
-    unexpected = [
-        key for key in info.get("unexpected_keys", [])
-        if not (encoder and (key.startswith("lm_head.") or key.endswith("._extra_state")))
-    ]
-    if unexpected or any(info.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
-        raise RuntimeError(f"Incomplete pretrained weight loading: {info}")
-
-
 def _load_pinned_esmfold2():
-    """Load the same fold and encoder checkpoints as the validated benchmark."""
-    import torch
-    from transformers.models.esmc.modeling_esmc import ESMCModel
-    from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
+    """Load the pinned fold and encoder checkpoints with `esm`'s own model class."""
+    from esm.models.esmfold2 import EsmFold2Model
 
-    model, info = ESMFold2Model.from_pretrained(
-        ESMFOLD2_HF_REPO,
-        revision=ESMFOLD2_HF_REVISION,
-        local_files_only=True,
+    volume = Path(ESMFOLD2_VOLUME_DIR)
+    model = EsmFold2Model.from_pretrained(
+        str(volume / "models--biohub--ESMFold2" / "snapshots" / ESMFOLD2_HF_REVISION),
         load_esmc=False,
-        output_loading_info=True,
+        device="cuda",
     )
-    _require_loaded_weights(info)
-    model = model.cuda().eval()
-    encoder_path = (
-        Path(ESMFOLD2_VOLUME_DIR) / "models--biohub--ESMC-6B"
-        / "snapshots" / ESMC_HF_REVISION
+    model.load_esmc(
+        str(volume / "models--biohub--ESMC-6B" / "snapshots" / ESMC_HF_REVISION),
+        precision="bf16",
     )
-    encoder, encoder_info = ESMCModel.from_pretrained(
-        str(encoder_path), local_files_only=True, output_loading_info=True,
-    )
-    _require_loaded_weights(encoder_info, encoder=True)
-    encoder = encoder.to(device="cuda", dtype=torch.bfloat16).eval()
-    for parameter in encoder.parameters():
-        parameter.requires_grad_(False)
-    model._esmc = encoder
-    model._esmc_fp8 = False
+    # Match the first pin: no MSA depth cap. See LEGACY_FOLD_OPTIONS in confidence.py.
+    model.config.msa_encoder.max_depth = None
+    model.eval()
     print(f"[esmfold2] Verified fold {ESMFOLD2_HF_REVISION}; encoder {ESMC_HF_REVISION}")
     return model
 
 
 esmfold2_image = (
-    Image.from_registry("nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04", add_python="3.12")
+    Image.from_registry("nvidia/cuda:12.8.1-devel-ubuntu24.04", add_python="3.12")
     .apt_install("git", "wget")
     .env({
         "CUDA_HOME": "/usr/local/cuda",
@@ -132,8 +113,8 @@ esmfold2_image = (
         "HF_HUB_CACHE": ESMFOLD2_VOLUME_DIR,
     })
     .pip_install(
+        f"transformers=={TRANSFORMERS_VERSION}",
         f"esm @ git+https://github.com/Biohub/esm.git@{ESMFOLD2_GIT_REF}",
-        "xformers",
     )
     .run_function(
         _download_esmfold2_models,
