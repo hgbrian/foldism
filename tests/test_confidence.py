@@ -627,3 +627,10 @@ def test_esmfold2_runtime_changes_cache_key(monkeypatch):
     before = get_cache_key("esmfold2", params)
     monkeypatch.setattr(esmfold2, "ESMFOLD2_RUNTIME", "other-runtime")
     assert get_cache_key("esmfold2", params) != before
+
+
+def test_ccd_file_comes_from_the_pinned_weights_snapshot():
+    from backends.esmfold2 import ESMFOLD2_CCD_PATH, ESMFOLD2_HF_REVISION
+
+    assert ESMFOLD2_HF_REVISION in ESMFOLD2_CCD_PATH
+    assert ESMFOLD2_CCD_PATH.endswith("/ccd.pkl")

@@ -32,6 +32,8 @@ ESMFOLD2_HF_REPO = "biohub/ESMFold2"
 # (which also bumps the cache key via esmfold2_cache_key), and rebuild.
 ESMFOLD2_HF_REVISION = "1afea82e432079d9af2ebd71d1e4c339ecca2ff0"
 ESMFOLD2_VOLUME_DIR = "/models/esmfold2"
+# The esm library otherwise downloads ccd.pkl from the Hugging Face main branch at run time.
+ESMFOLD2_CCD_PATH = f"{ESMFOLD2_VOLUME_DIR}/models--biohub--ESMFold2/snapshots/{ESMFOLD2_HF_REVISION}/ccd.pkl"
 ESMFOLD2_GIT_REF = "90d6497a546bb55929c2d3ca2e313d4613ec1922"
 TRANSFORMERS_VERSION = "5.16.0"
 ESMFOLD2_RUNTIME = f"esm@{ESMFOLD2_GIT_REF}+transformers=={TRANSFORMERS_VERSION}+legacy-inference-v1"
@@ -48,10 +50,17 @@ ESMFOLD2_MARKER = Path(ESMFOLD2_VOLUME_DIR) / "_DOWNLOADED"
 
 def _download_esmfold2_models():
     """Pre-download ESMFold2 weights (including LFS shards) to the model volume."""
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     cache_dir = Path(ESMFOLD2_VOLUME_DIR)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    hf_hub_download(
+        repo_id=ESMFOLD2_HF_REPO,
+        filename="ccd.pkl",
+        revision=ESMFOLD2_HF_REVISION,
+        cache_dir=str(cache_dir),
+    )
+    MODEL_VOLUME.commit()
 
     if ESMFOLD2_MARKER.exists():
         print(f"[BUILD] ESMFold2 already on volume (marker present); skipping download")
@@ -88,6 +97,8 @@ def _load_pinned_esmfold2():
     from esm.models.esmfold2 import EsmFold2Model
 
     volume = Path(ESMFOLD2_VOLUME_DIR)
+    if not Path(ESMFOLD2_CCD_PATH).is_file():
+        raise FileNotFoundError(f"Pinned CCD file missing: {ESMFOLD2_CCD_PATH}")
     model = EsmFold2Model.from_pretrained(
         str(volume / "models--biohub--ESMFold2" / "snapshots" / ESMFOLD2_HF_REVISION),
         load_esmc=False,
@@ -111,6 +122,7 @@ esmfold2_image = (
         "CUDA_HOME": "/usr/local/cuda",
         "HF_HOME": ESMFOLD2_VOLUME_DIR,
         "HF_HUB_CACHE": ESMFOLD2_VOLUME_DIR,
+        "ESMCFOLD_CCD_PATH": ESMFOLD2_CCD_PATH,
     })
     .pip_install(
         f"transformers=={TRANSFORMERS_VERSION}",
